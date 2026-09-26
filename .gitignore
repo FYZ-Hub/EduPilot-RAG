@@ -31,6 +31,9 @@ __pycache__/
 htmlcov/
 .coverage
 
+# 临时生成与本地探测输出（不得提交）
+.tmp/
+
 # 其他
 *.log
 .DS_Store

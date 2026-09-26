@@ -1,0 +1,8 @@
+# 固化语料的字节必须与生成器输出完全一致（manifest / ground truth 的 SHA-256 具有语义），
+# 因此禁止 Git 做换行转换；二进制语料按原样存取。
+demo/manifest.json text eol=lf
+demo/ground_truth.jsonl text eol=lf
+demo/corpus/** -text
+
+# 生成器与测试脚本统一使用 LF
+scripts/** text eol=lf

@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 1 已完成**
-- 下一阶段：**阶段 2 — 模拟语料、上传与解析**
+- 当前阶段：**阶段 2 进行中（阶段 2A 模拟语料已完成）**
+- 下一阶段：**阶段 2B — 上传、解析与异步初始化**
 - 最近更新：2026-09-26
 
 ## 阶段状态
@@ -12,7 +12,7 @@
 |---|---|---|
 | 0 | 环境预检 | completed |
 | 1 | Docker 前后端骨架 | completed |
-| 2 | 模拟语料、上传与解析 | not_started |
+| 2 | 模拟语料、上传与解析 | in_progress |
 | 3 | 语义切片与 Chroma | not_started |
 | 4 | FTS5 与混合检索 | not_started |
 | 5 | Reranker | not_started |
@@ -41,8 +41,21 @@
 - 验收：`docker compose config`、GPU 合并 `config`、`up --build -d`、`ps`、`/api/health`、`/knowledge`、`backend pytest`（9 passed）、`frontend pnpm test`（11 passed）、`frontend pnpm build`、`logs` 全部通过。
 - 浏览器实测：`/knowledge`、`/chat`、`/planning`、未知路由（404）均无横向溢出，控制台无错误。
 
+## 阶段 2A 结论（可复现的虚构模拟语料）
+
+- 输出：`scripts/generate_demo_corpus.py`、`scripts/demo_corpus/`（事实模型、生成组件、校验与隐私扫描）、`scripts/generator/`（固定依赖与字体）、`scripts/tests/`（36 项测试）、`demo/corpus/`（15 个固化文件）、`demo/manifest.json`、`demo/ground_truth.jsonl`。
+- 固定环境：一次性镜像 `campus-rag-generator:1.0.0`（`python:3.12.7-slim-bookworm` + 完全锁定依赖），未加入 `docker-compose.yml` 长期服务；生成阶段使用 `--network none`。
+- 固定字体：`scripts/generator/fonts/NotoSansSC-VF.ttf`（Noto Sans SC，SIL OFL 1.1），SHA-256 `a3041811a78c361b1de50f953c805e0244951c21c5bd412f7232ef0d899af0da`；不依赖系统字体，生成时不下载字体。
+- 语料：恰好 15 个文件（5 PDF / 5 DOCX / 5 XLSX），每份均标注“仅供系统演示的虚构资料”；`dataset_sha256 = 0f4577b6…13ead`，`manifest_sha256 = 09cf228e…d72af`，`ground_truth.jsonl` 55 条。
+- 确定性：相同镜像、相同种子下两次独立生成，文件集合、逐文件字节、SHA-256、manifest 与 ground truth 全部一致（byte diff = 0）。
+- 刻意冲突 3 处（稳定 `conflict_id`）：`degree_plan_total_credits`、`course_schedule_overlap_2026_2027_1`、`credit_recognition_cap`；ground truth 覆盖版本冲突、无答案拒答、提示注入、考试日期、规则计算与学业规划。
+- 学业规划期望值由 `demo_corpus.facts.compute_planning_result` 确定性计算，未手工填写。
+- 校验命令：`python -m pytest scripts`（36 passed，`--network none`）、`docker compose run --rm --no-deps backend python -m pytest`（9 passed）、`docker compose run --rm --no-deps frontend pnpm test`（11 passed）。
+- 本轮未实现用户上传、解析管线、SQLite、worker、演示 API、向量与 FTS、RAG/LLM 和前端加载按钮；语料**尚未进入知识库**，`loaded` 保持 `false`，未修改健康接口能力值。
+
 ## 备注
 
 - 本文件仅用于阶段状态跟踪；业务实现、构建与测试均在 Docker 容器内执行。
-- 阶段 1 未实现任何 RAG、解析、检索、学分能力，也未生成模拟语料（`demo/corpus` 仅为占位空目录）。
-- 进入阶段 2 前须按 `docs/IMPLEMENTATION_PLAN.md` 的阶段 2 验收标准执行。
+- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 只固化模拟语料，语料尚未进入知识库。
+- 语料生成/校验固定命令：在 `campus-rag-generator:1.0.0` 镜像内以 `--network none` 执行 `python scripts/generate_demo_corpus.py --output <dir> --seed 20260925`；固化到 `demo/` 必须显式追加 `--publish demo`。
+- 阶段 2B 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/DEMO_DATA_SPEC.md` 实现上传、解析与异步初始化。

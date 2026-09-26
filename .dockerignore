@@ -1,0 +1,13 @@
+# 生成器镜像构建上下文裁剪（backend/frontend 使用各自的上下文，不受此文件影响）
+.git
+.tmp
+data
+node_modules
+**/node_modules
+**/__pycache__
+**/.pytest_cache
+**/.mypy_cache
+*.log
+.env
+.env.*
+!.env.example

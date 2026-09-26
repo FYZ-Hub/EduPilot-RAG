@@ -1,0 +1,22 @@
+# 演示语料生成器固定依赖（完全锁定，含传递依赖）
+#
+# 解析基线：python:3.12.7-slim-bookworm + pip 24.2
+# 直接依赖：
+#   reportlab==4.2.5    生成 PDF（invariant 模式固定时间戳与文档 ID）
+#   python-docx==1.1.2  生成 DOCX
+#   openpyxl==3.1.5     生成 XLSX
+#   pypdf==5.1.0        测试中读取 PDF 文本，校验虚构标识与可读性
+#   pytest==8.3.4       生成器测试
+chardet==7.6.0
+et_xmlfile==2.0.0
+iniconfig==2.3.0
+lxml==6.1.3
+openpyxl==3.1.5
+packaging==26.3
+pillow==12.3.0
+pluggy==1.6.0
+pypdf==5.1.0
+pytest==8.3.4
+python-docx==1.1.2
+reportlab==4.2.5
+typing_extensions==4.16.0
