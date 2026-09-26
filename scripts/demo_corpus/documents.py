@@ -43,6 +43,31 @@ ZIP_COMPRESS_LEVEL = 9
 PDF_FONT_NAME = "DemoSC"
 PDF_FONT_NOTE = "NotoSansSC-VF.ttf"
 
+# reportlab 会在文件头硬编码一行带厂商域名的标识；生成后按等长方式替换为本地标识，
+# 既不改变字节偏移（xref 仍然有效），也不让厂商域名进入语料。
+_REPORTLAB_HEADER_LINE = b"\n%\223\214\213\236 ReportLab Generated PDF document http://www.reportlab.com\n"
+_PDF_HEADER_SAFE_TEXT = b"campus-rag demo corpus generator - local only"
+
+
+def _pdf_header_replacement() -> bytes:
+    prefix = b"\n%\223\214\213\236 "
+    suffix = b"\n"
+    body_length = len(_REPORTLAB_HEADER_LINE) - len(prefix) - len(suffix)
+    body = (_PDF_HEADER_SAFE_TEXT + b" " * body_length)[:body_length]
+    return prefix + body + suffix
+
+
+def sanitize_pdf_bytes(path: Path) -> None:
+    """剔除 reportlab 硬编码的厂商域名标识行（等长替换，保持字节偏移不变）。"""
+    path = Path(path)
+    raw = path.read_bytes()
+    occurrences = raw.count(_REPORTLAB_HEADER_LINE)
+    if occurrences > 1:
+        raise RuntimeError(f"PDF 头部出现多于一次 reportlab 标识行：{path}")
+    if occurrences == 0:
+        return
+    path.write_bytes(raw.replace(_REPORTLAB_HEADER_LINE, _pdf_header_replacement()))
+
 
 # ---------------------------------------------------------------------------
 # OOXML ZIP 归一化
@@ -96,21 +121,30 @@ class PdfWriter:
         self.canvas.setTitle(title)
         self.canvas.setAuthor(facts.DOC_AUTHOR)
         self.canvas.setSubject(subject)
-        self.canvas.setCreator(facts.DOC_PRODUCER)
+        self.canvas.setCreator(facts.DOC_CREATOR)
+        self.canvas.setProducer(facts.DOC_PRODUCER)
         self.canvas.setKeywords(keywords)
         self.page = 1
         self.y = PAGE_HEIGHT - MARGIN_TOP
         self.sections: list[str] = []
         self.section_pages: dict[str, int] = {}
+        self.section_ends: dict[str, int] = {}
+        self._current_section: str | None = None
+        self.page_lines: dict[int, list[str]] = {}
         self._draw_footer()
         self._document_key = document_key
 
     # -- 基础绘制 ---------------------------------------------------------
 
+    def _draw(self, x: float, y: float, text: str) -> None:
+        """绘制并记录文本，便于按内容页生成准确引用定位。"""
+        self.canvas.drawString(x, y, text)
+        self.page_lines.setdefault(self.page, []).append(text)
+
     def _draw_footer(self) -> None:
         self.canvas.setFont(PDF_FONT_NAME, 8.5)
         self.canvas.setFillColor(colors.HexColor("#666666"))
-        self.canvas.drawString(
+        self._draw(
             MARGIN_LEFT,
             MARGIN_BOTTOM - 22,
             f"{facts.FICTION_MARKER} · 第 {self.page} 页",
@@ -148,7 +182,7 @@ class PdfWriter:
         for line in self._wrap(text, size):
             self._ensure(leading)
             self.canvas.setFont(PDF_FONT_NAME, size)
-            self.canvas.drawString(MARGIN_LEFT + indent, self.y - size, line)
+            self._draw(MARGIN_LEFT + indent, self.y - size, line)
             self.y -= leading
 
     # -- 内容块 -----------------------------------------------------------
@@ -165,7 +199,7 @@ class PdfWriter:
         self.canvas.setFont(PDF_FONT_NAME, size)
         cursor = top - 5
         for line in lines:
-            self.canvas.drawString(MARGIN_LEFT + 6, cursor - size, line)
+            self._draw(MARGIN_LEFT + 6, cursor - size, line)
             cursor -= leading
         self.y = top - height - 12
 
@@ -182,6 +216,9 @@ class PdfWriter:
         self._ensure(leading + 10)
         self.y -= 6
         self._paragraph(text, size, leading)
+        if self._current_section is not None:
+            self.section_ends[self._current_section] = self.page
+        self._current_section = text
         self.sections.append(text)
         self.section_pages[text] = self.page
 
@@ -224,7 +261,7 @@ class PdfWriter:
             self.canvas.setFont(PDF_FONT_NAME, size)
             for index, lines in enumerate(wrapped):
                 for offset, line in enumerate(lines):
-                    self.canvas.drawString(x + 4, top - size - 2 - offset * leading, line)
+                    self._draw(x + 4, top - size - 2 - offset * leading, line)
                 x += columns[index]
             self.y = top - row_height - 4
             self.canvas.setStrokeColor(colors.HexColor("#cccccc"))
@@ -254,13 +291,21 @@ class PdfWriter:
     # -- 收尾 -------------------------------------------------------------
 
     def finish(self) -> dict:
-        self.canvas._doc._ID = (
-            b"\n[<" + self._document_key.encode("ascii") + b"><" + self._document_key.encode("ascii") + b">]\n"
-            b"% ReportLab generated PDF document -- digest (http://www.reportlab.com)\n"
-        )
+        key = self._document_key.encode("ascii")
+        self.canvas._doc._ID = b"\n[<" + key + b"><" + key + b">]\n"
         self.canvas.showPage()
         self.canvas.save()
-        return {"page_count": self.page, "sections": list(self.sections), "section_pages": dict(self.section_pages)}
+        sanitize_pdf_bytes(self.path)
+        if self._current_section is not None:
+            self.section_ends[self._current_section] = self.page
+        page_texts = [self.page_lines.get(number, []) for number in range(1, self.page + 1)]
+        return {
+            "page_count": self.page,
+            "sections": list(self.sections),
+            "section_pages": dict(self.section_pages),
+            "section_ends": dict(self.section_ends),
+            "page_texts": ["\n".join(lines) for lines in page_texts],
+        }
 
 
 def pdf_document_key(file_name: str) -> str:

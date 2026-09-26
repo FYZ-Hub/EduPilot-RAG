@@ -6,3 +6,7 @@ demo/corpus/** -text
 
 # 生成器与测试脚本统一使用 LF
 scripts/** text eol=lf
+
+# 字体是二进制资产：覆盖上面的 text/eol 规则，禁止换行转换与文本 diff，
+# 否则 Git 会把字体里的 CRLF 字节改写成 LF 并破坏其 SHA-256。
+scripts/generator/fonts/*.ttf -text -diff !eol

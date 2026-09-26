@@ -7,11 +7,11 @@
   "generator_version": "1.0.0",
   "generated_at": "2026-09-25T00:00:00Z",
   "document_count": 15,
-  "dataset_sha256": "0f4577b625994fc2e6611f54bcd2f8f4368095de1a632b242120f6171cd13ead",
+  "dataset_sha256": "d4a7a44a0e586317632a19f7a6befcd59eb8572eb9bc34cf608215da448d0a3e",
   "documents": [
     {
       "path": "corpus/01-培养方案-计算机科学与技术-2025版.pdf",
-      "sha256": "fd63f4561e900927092b92433e1dd1823c1db58980b9a0ad31ff5dd926917157",
+      "sha256": "74969bc01ab3f2a582b1317b06acdc45e98317a73457da9eeb78d44592d0fb57",
       "file_type": "pdf",
       "doc_category": "degree_plan",
       "title": "启明大学计算机科学与技术专业培养方案（2025版）",
@@ -28,11 +28,37 @@
         "四、课程设置与先修关系",
         "五、毕业要求"
       ],
-      "intentional_conflicts": []
+      "intentional_conflicts": [
+        {
+          "conflict_id": "degree_plan_required_courses",
+          "field": "专业必修课程门数与学分要求",
+          "reason": "2026 修订版培养方案把 QM-CS303 计算机网络列为专业必修并把专业必修学分下限提高到 60.0 学分；2025 版专业必修为 7 门、学分下限 58.0 学分，不含 QM-CS303。",
+          "sources": [
+            {
+              "path": "corpus/01-培养方案-计算机科学与技术-2025版.pdf",
+              "value": "7 门 / 58.0 学分",
+              "locator": {
+                "path": "corpus/01-培养方案-计算机科学与技术-2025版.pdf",
+                "page_number": 1,
+                "section_title": "四、课程设置与先修关系"
+              }
+            },
+            {
+              "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
+              "value": "8 门 / 60.0 学分",
+              "locator": {
+                "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
+                "page_number": 2,
+                "section_title": "四、课程设置与先修关系"
+              }
+            }
+          ]
+        }
+      ]
     },
     {
       "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
-      "sha256": "3a4ab8ac4871f879e78da95ad0555aeda89a9715befb4e45b620d9510f8444a5",
+      "sha256": "cc3afe9d37b556c26eeaf4b5476d84a9fd85a1d83fbe346cf890997f7d19dfa9",
       "file_type": "pdf",
       "doc_category": "degree_plan",
       "title": "启明大学计算机科学与技术专业培养方案（2026修订版）",
@@ -71,6 +97,31 @@
                 "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
                 "page_number": 1,
                 "section_title": "三、学分要求"
+              }
+            }
+          ]
+        },
+        {
+          "conflict_id": "degree_plan_required_courses",
+          "field": "专业必修课程门数与学分要求",
+          "reason": "2026 修订版培养方案把 QM-CS303 计算机网络列为专业必修并把专业必修学分下限提高到 60.0 学分；2025 版专业必修为 7 门、学分下限 58.0 学分，不含 QM-CS303。",
+          "sources": [
+            {
+              "path": "corpus/01-培养方案-计算机科学与技术-2025版.pdf",
+              "value": "7 门 / 58.0 学分",
+              "locator": {
+                "path": "corpus/01-培养方案-计算机科学与技术-2025版.pdf",
+                "page_number": 1,
+                "section_title": "四、课程设置与先修关系"
+              }
+            },
+            {
+              "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
+              "value": "8 门 / 60.0 学分",
+              "locator": {
+                "path": "corpus/02-培养方案-计算机科学与技术-2026修订版.pdf",
+                "page_number": 2,
+                "section_title": "四、课程设置与先修关系"
               }
             }
           ]
@@ -236,7 +287,7 @@
     },
     {
       "path": "corpus/09-考试通知-2026-2027-1期末考试安排.pdf",
-      "sha256": "8de356c32d1534688d68970e1e2052ebf2fe603bf6a8f49d3b81b32110ccdd00",
+      "sha256": "3fe5e919f191304b836f2449d6ed2ed2001fcec816cdd7052fb88670cdd48944",
       "file_type": "pdf",
       "doc_category": "exam_notice",
       "title": "启明大学 2026-2027 学年第一学期期末考试安排通知（模拟）",
@@ -255,7 +306,7 @@
     },
     {
       "path": "corpus/10-考试通知-2025-2026-2补考安排.pdf",
-      "sha256": "085b0eaef952563a01380b9fc21f1b4df80a69beb8e794e3d52ac3eb907850cb",
+      "sha256": "b13fde63e87e8812fe6c6fa4783891be7521a9d7d41e310c3e54acd780b6181c",
       "file_type": "pdf",
       "doc_category": "exam_notice",
       "title": "启明大学 2025-2026 学年第二学期补考安排通知（模拟）",
@@ -374,7 +425,7 @@
     },
     {
       "path": "corpus/15-安全测试-不可信文档示例.pdf",
-      "sha256": "fbc4de01fbf3d048e88e4020547c327675996165ed248b963a35cde5e52dafcf",
+      "sha256": "68b4c9ad56510b5e3a092817f8410792aed3262324145154d2f78a3ff61b49db",
       "file_type": "pdf",
       "doc_category": "security_test",
       "title": "启明大学安全测试样本：不可信文档示例（模拟）",

@@ -26,7 +26,8 @@ FICTION_NOTICE = (
 )
 
 DOC_AUTHOR = "启明大学模拟资料生成器"
-DOC_PRODUCER = "campus-rag demo corpus generator"
+DOC_CREATOR = "campus-rag-demo-corpus-generator"
+DOC_PRODUCER = "campus-rag-demo-corpus-generator"
 
 MAJOR_NAME = "计算机科学与技术"
 MAJOR_CODE = "QM-CS"
@@ -72,10 +73,14 @@ COURSES = [
     _course("QM-CS301", "操作系统", 4.0, "专业必修", 4, ["QM-CS201"], "平时30%+期末70%"),
     _course("QM-CS302", "数据库系统", 4.0, "专业必修", 4, ["QM-CS201"], "平时30%+期末70%"),
     _course("QM-CS303", "计算机网络", 3.0, "专业必修", 5, ["QM-CS204"], "平时30%+期末70%"),
-    _course("QM-CS401", "软件工程", 3.0, "专业必修", 5, ["QM-CS201"], "平时30%+期末70%"),
+    # 软件工程不属于任何一个培养方案版本的必修列表，因此事实模型中归为专业选修
+    _course("QM-CS401", "软件工程", 3.0, "专业选修", 5, ["QM-CS201"], "平时30%+期末70%"),
 ]
 
 COURSE_BY_CODE = {c["course_code"]: c for c in COURSES}
+
+# 事实模型中标记为必修的课程类别；这些课程必须出现在培养方案的必修列表里
+MANDATORY_CATEGORIES = ("公共必修", "专业必修")
 
 
 def term_label(index: int) -> str:
@@ -148,6 +153,40 @@ PLAN_BY_VERSION = {p["version"]: p for p in DEGREE_PLANS}
 
 # 学分认定办法规定的单次认定上限（与 2026 修订版培养方案构成冲突）
 POLICY_CREDIT_RECOGNITION_CAP = 6
+
+
+# ---------------------------------------------------------------------------
+# 培养方案课程视图（生成与校验共用，避免正文与事实模型漂移）
+# ---------------------------------------------------------------------------
+
+
+def plan_required_codes(plan: dict, category: str) -> list[str]:
+    """方案指定类别的必修课程代码，顺序与方案定义一致。"""
+    return list(plan["required_course_codes"][category])
+
+
+def plan_mandatory_courses(plan: dict) -> list[tuple[dict, str]]:
+    """按方案返回必修课程 (course, 方案类别)；旧版本不会出现新版新增课程。"""
+    rows: list[tuple[dict, str]] = []
+    for category in MANDATORY_CATEGORIES:
+        for code in plan["required_course_codes"][category]:
+            rows.append((COURSE_BY_CODE[code], category))
+    return rows
+
+
+def plan_optional_courses(plan: dict) -> list[dict]:
+    """方案中非必修课程：事实模型中不属于必修类别的课程。"""
+    mandatory = {code for codes in plan["required_course_codes"].values() for code in codes}
+    return [
+        course
+        for course in COURSES
+        if course["course_code"] not in mandatory and course["category"] not in MANDATORY_CATEGORIES
+    ]
+
+
+def plan_added_required_codes(newer: dict, older: dict, category: str = "专业必修") -> list[str]:
+    """``newer`` 相对 ``older`` 新增的必修课程代码（稳定排序）。"""
+    return sorted(set(plan_required_codes(newer, category)) - set(plan_required_codes(older, category)))
 
 # ---------------------------------------------------------------------------
 # 匿名学生课程记录

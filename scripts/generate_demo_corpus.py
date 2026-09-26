@@ -2,12 +2,16 @@
 """确定性生成启明大学虚构模拟语料、manifest 与 ground truth。
 
 完全离线运行：不访问网络、不调用外部 API，也不调用任何大模型。
-必须显式提供 ``--output``（数据集根目录）；默认不会写入 ``demo/``，
-固化到仓库需要额外显式传入 ``--publish``。
+
+安全约束：
+- ``--output`` 只允许仓库 ``.tmp/`` 下的子目录（且不能是 ``.tmp`` 本身），
+  已存在且非空时安全失败，绝不删除其中任何文件；
+- ``--publish`` 只允许仓库 ``demo/``，且在固化前后各自运行一次完整校验。
 
 规范命令（在固定 Docker 生成器环境内）：
 
     python scripts/generate_demo_corpus.py --output .tmp/demo-generated --seed 20260925
+    python scripts/generate_demo_corpus.py --output .tmp/demo-generated --seed 20260925 --publish demo
 """
 
 from __future__ import annotations
@@ -24,6 +28,14 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from demo_corpus import facts  # noqa: E402
 from demo_corpus.build import build_dataset, publish_dataset  # noqa: E402
+from demo_corpus.paths import (  # noqa: E402
+    OutputDirectoryNotEmptyError,
+    UnsafePathError,
+    assert_disjoint,
+    repo_root,
+    resolve_output_dir,
+    resolve_publish_dir,
+)
 from demo_corpus.validate import validate_dataset  # noqa: E402
 
 DEFAULT_FONT_PATH = Path(__file__).resolve().parent / "generator" / "fonts" / "NotoSansSC-VF.ttf"
@@ -49,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--output",
         required=True,
         type=Path,
-        help="数据集根目录，其下生成 corpus/、manifest.json 和 ground_truth.jsonl（必填）。",
+        help="数据集根目录，必须是仓库 .tmp/ 下的子目录；其下生成 corpus/、manifest.json、ground_truth.jsonl。",
     )
     parser.add_argument(
         "--seed",
@@ -67,28 +79,44 @@ def build_parser() -> argparse.ArgumentParser:
         "--publish",
         type=Path,
         default=None,
-        help="生成并校验通过后，把产物固化到该目录（例如 demo）。不传则不写入。",
+        help="生成并校验通过后，把产物固化到仓库 demo/（只允许 demo/）。不传则不写入。",
     )
     return parser
 
 
-def main(argv: list[str] | None = None) -> int:
+def _report_problems(title: str, problems: list[str]) -> None:
+    print(title, file=sys.stderr)
+    for problem in problems:
+        print(f"  - {problem}", file=sys.stderr)
+
+
+def main(argv: list[str] | None = None, *, repo_root_path: Path | None = None) -> int:
     args = build_parser().parse_args(argv)
     _configure_environment()
+
+    root = Path(repo_root_path) if repo_root_path is not None else repo_root()
+    try:
+        output_dir = resolve_output_dir(args.output, repo_root_path=root)
+        publish_dir = resolve_publish_dir(args.publish, repo_root_path=root) if args.publish is not None else None
+        assert_disjoint(output_dir, publish_dir)
+    except UnsafePathError as error:
+        print(f"拒绝执行：{error}", file=sys.stderr)
+        return 2
 
     font_path = Path(args.font)
     if not font_path.is_file():
         print(f"字体文件不存在：{font_path}", file=sys.stderr)
         return 2
 
-    result = build_dataset(Path(args.output), int(args.seed), font_path)
+    try:
+        result = build_dataset(output_dir, int(args.seed), font_path)
+    except OutputDirectoryNotEmptyError as error:
+        print(f"拒绝执行：{error}", file=sys.stderr)
+        return 2
 
-    validation = validate_dataset(Path(args.output))
-    problems = validation["problems"]
-    if problems:
-        print("语料校验未通过，已中止：", file=sys.stderr)
-        for problem in problems:
-            print(f"  - {problem}", file=sys.stderr)
+    validation = validate_dataset(output_dir)
+    if validation["problems"]:
+        _report_problems("临时数据集校验未通过，已中止（未固化）：", validation["problems"])
         return 1
 
     summary = {
@@ -101,11 +129,14 @@ def main(argv: list[str] | None = None) -> int:
         "ground_truth_sha256": result["ground_truth_sha256"],
     }
 
-    published = None
-    if args.publish is not None:
-        publish_dataset(Path(args.output), Path(args.publish))
-        published = str(Path(args.publish))
-        summary["published_to"] = published
+    if publish_dir is not None:
+        publish_dataset(output_dir, publish_dir)
+        published = validate_dataset(publish_dir)
+        if published["problems"]:
+            _report_problems("固化目标校验未通过：", published["problems"])
+            return 1
+        summary["published_to"] = str(publish_dir)
+        summary["publish_validation"] = "passed"
 
     print(json.dumps(summary, ensure_ascii=False, indent=2))
     return 0

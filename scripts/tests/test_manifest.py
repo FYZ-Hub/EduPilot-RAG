@@ -62,6 +62,7 @@ def test_intentional_conflicts_are_recorded(dataset):
     }
     assert set(conflicts) == {
         "degree_plan_total_credits",
+        "degree_plan_required_courses",
         "course_schedule_overlap_2026_2027_1",
         "credit_recognition_cap",
     }
@@ -74,3 +75,15 @@ def test_intentional_conflicts_are_recorded(dataset):
         for source in conflict["sources"]:
             assert source["path"].startswith("corpus/")
             assert source["locator"]["path"] == source["path"]
+
+
+def test_version_difference_conflict_covers_both_degree_plans(dataset):
+    documents = dataset["manifest"]["documents"]
+    carriers = {
+        doc["path"]
+        for doc in documents
+        if any(conflict["conflict_id"] == "degree_plan_required_courses" for conflict in doc["intentional_conflicts"])
+    }
+    plan_paths = {doc["path"] for doc in documents if doc["doc_category"] == "degree_plan"}
+    assert len(plan_paths) == 2
+    assert carriers == plan_paths
