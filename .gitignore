@@ -1,0 +1,27 @@
+# 环境与密钥
+.env
+.env.*
+!.env.example
+
+# 运行时数据与数据库
+data/
+uploads/
+models/
+*.db
+*.sqlite*
+chroma/
+
+# 前端
+node_modules/
+dist/
+coverage/
+playwright-report/
+test-results/
+
+# Python
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
