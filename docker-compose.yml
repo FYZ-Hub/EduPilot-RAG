@@ -1,0 +1,66 @@
+services:
+  backend:
+    build:
+      context: ./backend
+    image: campus-rag-backend:0.1.0
+    environment:
+      # 应用
+      APP_ENV: development
+      APP_NAME: campus-rag-assistant
+      LOG_LEVEL: INFO
+      FRONTEND_PORT: "5173"
+      BACKEND_PORT: "8000"
+      CORS_ORIGINS: http://localhost:5173
+      # 数据目录（容器内路径，持久化到 ./data）
+      DATABASE_URL: sqlite:////app/data/sqlite/app.db
+      CHROMA_PATH: /app/data/chroma
+      UPLOAD_PATH: /app/data/uploads
+      MODEL_CACHE_PATH: /app/data/models
+      # 演示资料（阶段 2 起使用，本阶段只挂载只读目录）
+      DEMO_DATASET_ENABLED: "true"
+      DEMO_DATASET_PATH: /app/demo
+      DEMO_DATASET_VERSION: "2026.1"
+      DEMO_JOB_POLL_SECONDS: "2"
+      DEMO_JOB_LEASE_SECONDS: "60"
+      # Embedding / Reranker：默认兼容模式固定 CPU，不申请 GPU
+      EMBEDDING_PROVIDER: local
+      EMBEDDING_MODEL: BAAI/bge-m3
+      EMBEDDING_DIMENSION: "1024"
+      EMBEDDING_DEVICE: cpu
+      EMBEDDING_BATCH_SIZE: "4"
+      RERANK_PROVIDER: local
+      RERANK_MODEL: BAAI/bge-reranker-v2-m3
+      RERANK_DEVICE: cpu
+      RERANK_BATCH_SIZE: "2"
+      # LLM：缺省未配置，服务仍可启动
+      LLM_PROVIDER: openai_compatible
+      LLM_TIMEOUT_SECONDS: "60"
+    ports:
+      - "8000:8000"
+    volumes:
+      - ./data:/app/data
+      - ./demo:/app/demo:ro
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request,sys; sys.exit(0 if urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3).status == 200 else 1)"
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 15s
+    restart: unless-stopped
+
+  frontend:
+    build:
+      context: ./frontend
+    image: campus-rag-frontend:0.1.0
+    environment:
+      VITE_API_BASE_URL: http://localhost:8000/api
+    ports:
+      - "5173:5173"
+    depends_on:
+      backend:
+        condition: service_started
+    restart: unless-stopped

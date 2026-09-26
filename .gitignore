@@ -17,6 +17,9 @@ dist/
 coverage/
 playwright-report/
 test-results/
+.vite/
+*.tsbuildinfo
+.eslintcache
 
 # Python
 __pycache__/
@@ -25,3 +28,9 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+htmlcov/
+.coverage
+
+# 其他
+*.log
+.DS_Store

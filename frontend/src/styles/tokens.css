@@ -1,0 +1,46 @@
+/**
+ * 设计 Token（唯一来源：docs/UI_SPEC.md 3.1–3.3）。
+ * 组件内不得散落十六进制颜色。
+ */
+:root {
+  --ep-color-primary: #3157d5;
+  --ep-color-primary-hover: #2447b8;
+  --ep-color-primary-soft: #eef3ff;
+  --ep-color-evidence: #0f766e;
+  --ep-color-evidence-soft: #ecfdf5;
+  --ep-color-success: #15803d;
+  --ep-color-warning: #b45309;
+  --ep-color-danger: #b91c1c;
+  --ep-color-info: #475569;
+  --ep-color-text: #0f172a;
+  --ep-color-text-secondary: #475569;
+  --ep-color-text-muted: #64748b;
+  --ep-color-border: #dbe3ef;
+  --ep-color-border-light: #e8edf5;
+  --ep-color-page: #f4f7fb;
+  --ep-color-surface: #ffffff;
+  --ep-color-surface-subtle: #f8fafc;
+  --ep-focus-ring: 0 0 0 3px rgba(49, 87, 213, 0.22);
+
+  --ep-font-family: Inter, "PingFang SC", "Microsoft YaHei", "Noto Sans CJK SC", sans-serif;
+
+  --ep-space-1: 4px;
+  --ep-space-2: 8px;
+  --ep-space-3: 12px;
+  --ep-space-4: 16px;
+  --ep-space-5: 20px;
+  --ep-space-6: 24px;
+  --ep-space-7: 32px;
+  --ep-space-8: 40px;
+
+  --ep-radius-card: 12px;
+  --ep-radius-bubble: 14px;
+  --ep-radius-dialog: 16px;
+
+  --ep-shadow-overlay: 0 12px 32px rgba(15, 23, 42, 0.12);
+
+  --ep-sidebar-width: 224px;
+  --ep-sidebar-width-compact: 72px;
+  --ep-topbar-height: 64px;
+  --ep-content-padding: 24px;
+}

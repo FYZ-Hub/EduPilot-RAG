@@ -1,0 +1,13 @@
+# 仅在显式启用 gpu Profile 时叠加使用：
+#   docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu <command>
+# 只覆盖同名 backend，不创建第二个后端服务，也不新增 GPU 专用 env 文件。
+services:
+  backend:
+    profiles:
+      - gpu
+    gpus: all
+    environment:
+      EMBEDDING_DEVICE: cuda
+      EMBEDDING_BATCH_SIZE: "8"
+      RERANK_DEVICE: cuda
+      RERANK_BATCH_SIZE: "4"
