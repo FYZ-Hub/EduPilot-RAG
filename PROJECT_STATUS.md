@@ -108,6 +108,53 @@
 - **已知遗留**：`frontend/src/views/PlanningView.vue` 仍写着「health 返回 planning=unavailable」
   的占位说明，已因本阶段而失效；按本轮范围（禁止 Vue 页面与阶段 8 功能）未改动，留待阶段 8 一并重写。
 
+### 阶段 7C 独立回归修复轮（BUG-7C-01 / BUG-7C-02）
+
+阶段 7 仍为 `completed`，本轮只修复两个已确认缺陷，未进入阶段 8、未改动任何 Vue 页面，
+也未修改 `PRODUCT_SPEC.md` / `UI_SPEC.md` / `demo/ground_truth.jsonl` 来迁就实现。
+
+**BUG-7C-01｜时间冲突范围未限定所选记录、区间边界判定错误**
+
+- 缺陷：① `schedule_document_conflicts()` 扫描 active demo 的**全部**课表冲突，
+  与本次显式选择的 record set 无关的冲突也会被附加到结果；
+  ② `record_schedule_conflicts()` 处理所有带 `schedule` 的记录，既不限定
+  `status=in_progress`，也不按 `semester` 隔离；
+  ③ `_overlaps()` 对时钟区间用 `<=`，把首尾相接的 `09:00-10:00` 与 `10:00-11:00`
+  误判为重叠。
+- 修复：时钟区间改为**半开区间**（`left.start < right.end and right.start < left.end`），
+  节次保持**端点包含**的离散区间（共享节次仍算冲突）；时间冲突只取 `status=in_progress`
+  且学期可识别的记录，并按归一化学期（`2026-2027-1` 与 `2026-2027 学年第一学期` 归一）
+  分组比较；课表冲突只有当某时间段的课程里至少有一门属于「所选记录中**同学期在修**课程」
+  时才算相关（证据仍覆盖冲突**双方**来源），文档未声明适用学期时直接跳过而不猜测。
+  课表适用学期取自该文档真实的 `DocumentBlock`（`说明项: 适用学期；内容: …`）。
+- 新增测试：`backend/tests/test_academic_conflict_scope.py`（11 项）。
+- 修复前：`pytest tests/test_academic_conflict_scope.py` + 下述 7C-02 测试 →
+  **7 failed / 6 passed，退出码 1**（其中本文件为 6 failed / 5 passed）；
+  修复后：与 plan / evidence / ground-truth 一起 **45 passed，退出码 0**。
+
+**BUG-7C-02｜不完整证据定位仍被接受**
+
+- 缺陷：`load_evidence()` 只判断 `locator` 是否为空字典，因此「只有 `block_start`/`block_end`」
+  或「XLSX 缺 `sheet_name` / 缺行区间 / 行号非正 / `row_start > row_end`」或
+  「PDF/DOCX 既无页码也无章节标题」的定位都会通过，前端无法实际展示与跳转。
+- 修复：按文件类型校验定位**可展示性** —— XLSX 必须有非空 `sheet_name` 与
+  `1 <= row_start <= row_end` 的正整数区间；PDF/DOCX 至少要有合法正整数 `page_number`
+  或非空 `section_title`。不完整即返回 `ACADEMIC_EVIDENCE_UNAVAILABLE`，
+  **不补默认页码或默认行号**。
+- 新增测试：`test_load_evidence_rejects_non_displayable_locators`（8 组非法定位 + 2 组正例）。
+- 修复前：该测试 `Failed: DID NOT RAISE`（退出码 1）；修复后通过。
+
+**本轮验收**
+
+- `docker compose exec backend pytest -q` → **671 passed**（上一轮 659，净 +12）；
+  前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`
+  符合预期；`git diff --check` 无输出；`git status --short` 为空。
+- 未破坏的契约已逐项复验：请求体仍严格两个 ID、`PlanningResult` 仍严格 8 字段、
+  `PlanningEvidence` 仍严格 11 字段、所有 `evidence_chunk_ids` 均在顶层 evidence 中、
+  证据切片仍不建检查点 / 不写 FTS / 不写向量 / `retrievable=false`、
+  6 条 planning ground truth 全部通过、`health.planning` 仍为 `ready`、
+  7A 数值规则与 `planning.py` 均未引入任何学分算法。
+
 ## 阶段 7A 结论（确定性学分规则引擎 · 持久化与纯计算）
 
 阶段 7 为 `in_progress`：本轮只完成 7A（持久化模型 + 增量建表 + Decimal 确定性纯计算引擎 + 核心单测）。**7B / 7C 只设计接口，尚未实现**；阶段 8 保持 `not_started`。**学分完全由确定性规则计算，LLM 未参与任何数字计算。**

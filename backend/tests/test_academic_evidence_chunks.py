@@ -233,6 +233,66 @@ def test_load_evidence_fails_safely_on_broken_sources(client, context) -> None:
         session.rollback()
 
 
+def test_load_evidence_rejects_non_displayable_locators(client, context) -> None:
+    """定位必须能让前端实际展示：XLSX 需要工作表与合法行区间；PDF/DOCX 需要页码或章节标题。
+
+    只含块范围、缺字段、行号非正、行序颠倒或两类定位都没有时，一律安全失败，
+    **不得**补默认页码或默认行号。
+    """
+    from app.academic.planning import load_evidence
+    from app.core.errors import ApiError
+
+    records = _import_records(client)
+    rules = _import_rules(client)
+    xlsx_doc = _source_doc_id(context, records["id"])
+    pdf_doc = _source_doc_id(context, rules["id"], AcademicRuleSet)
+    xlsx_chunk = _chunks(context, xlsx_doc)[0]
+    pdf_chunk = _chunks(context, pdf_doc)[0]
+
+    # 正例：正常的 XLSX / PDF 定位都能读取
+    with context.session_factory() as session:
+        assert load_evidence(session, {xlsx_chunk.id: xlsx_doc})
+        assert load_evidence(session, {pdf_chunk.id: pdf_doc})
+
+    bad_locators = (
+        (xlsx_chunk, {"block_start": 0, "block_end": 3}),
+        (
+            xlsx_chunk,
+            {"block_start": 0, "block_end": 3, "sheet_name": "S", "row_start": None, "row_end": 3},
+        ),
+        (
+            xlsx_chunk,
+            {"block_start": 0, "block_end": 3, "sheet_name": "S", "row_start": 2, "row_end": None},
+        ),
+        (
+            xlsx_chunk,
+            {"block_start": 0, "block_end": 3, "sheet_name": "S", "row_start": 0, "row_end": 3},
+        ),
+        (
+            xlsx_chunk,
+            {"block_start": 0, "block_end": 3, "sheet_name": "S", "row_start": 5, "row_end": 3},
+        ),
+        (
+            xlsx_chunk,
+            {"block_start": 0, "block_end": 3, "sheet_name": "   ", "row_start": 1, "row_end": 3},
+        ),
+        (pdf_chunk, {"block_start": 0, "block_end": 3}),
+        (
+            pdf_chunk,
+            {"block_start": 0, "block_end": 3, "page_number": 0, "section_title": "   "},
+        ),
+    )
+    for chunk, locator in bad_locators:
+        with context.session_factory() as session:
+            node = session.get(DocumentChunk, chunk.id)
+            node.locator = dict(locator)
+            session.commit()
+            with pytest.raises(ApiError) as error:
+                load_evidence(session, {chunk.id: chunk.doc_id})
+            assert error.value.code == "ACADEMIC_EVIDENCE_UNAVAILABLE", locator
+            session.rollback()
+
+
 def test_evidence_backfill_requires_real_blocks(client, context) -> None:
     """DocumentBlock 缺失时不得伪造证据，必须安全失败。"""
     from app.academic.evidence import backfill_record_set

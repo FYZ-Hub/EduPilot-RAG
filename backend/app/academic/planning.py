@@ -27,6 +27,7 @@ from app.academic.options import active_demo_version, visibility_clause
 from app.academic.projection import labelled_pairs
 from app.academic.service import load_chunk_locators, resolve_source_chunk
 from app.academic.types import (
+    STATUS_IN_PROGRESS,
     WARN_CATEGORY_MISMATCH,
     WARN_COURSE_NOT_IN_RULE,
     WARN_RECORD_CONTRADICTION,
@@ -73,6 +74,27 @@ _PERIOD_RE = re.compile(r"第(?P<start>\d{1,2})\s*-\s*(?P<end>\d{1,2})节")
 _CLOCK_RE = re.compile(
     r"(?P<h1>\d{1,2}):(?P<m1>\d{2})\s*-\s*(?P<h2>\d{1,2}):(?P<m2>\d{2})"
 )
+# 学期：``2026-2027-1`` 与 ``2026-2027 学年第一学期`` 归一为同一种形式
+_TERM_RE = re.compile(
+    r"(?P<start>\d{4})\s*[-–—]\s*(?P<end>\d{4})\s*(?:学年)?\s*[-第]?\s*(?P<term>[一二1-2])"
+    r"(?:\s*学期)?"
+)
+_TERM_DIGITS = {"一": "1", "二": "2"}
+
+
+def normalize_term(value: str | None) -> str | None:
+    """把学期描述归一为 ``YYYY-YYYY-N``；无法确定性识别时返回 ``None``（绝不猜测）。"""
+    if not value:
+        return None
+    match = _TERM_RE.search(value)
+    if match is None:
+        return None
+    term = _TERM_DIGITS.get(match.group("term"), match.group("term"))
+    return f"{match.group('start')}-{match.group('end')}-{term}"
+
+
+def _positive_int(value: object) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value > 0
 
 
 @dataclass(frozen=True)
@@ -309,12 +331,27 @@ def _schedule_interval(text: str | None) -> tuple[str, str, int, int] | None:
 
 
 def _overlaps(left: tuple[str, str, int, int], right: tuple[str, str, int, int]) -> bool:
-    return (
-        left[0] == right[0]
-        and left[1] == right[1]
-        and left[2] <= right[3]
-        and right[2] <= left[3]
-    )
+    """同星期、同单位才可比：时钟按**半开区间**，节次按**端点包含**的离散区间。"""
+    if left[0] != right[0] or left[1] != right[1]:
+        return False
+    if left[1] == "clock":
+        # 09:00-10:00 与 10:00-11:00 首尾相接，不算重叠
+        return left[2] < right[3] and right[2] < left[3]
+    # 第1-2节与第2-3节共享第2节，属于真实冲突
+    return left[2] <= right[3] and right[2] <= left[3]
+
+
+def in_progress_terms(records: Sequence[CourseRecord]) -> dict[str, set[str]]:
+    """课程代码 → 该学生在选学期集合；只统计 ``in_progress`` 且有可识别学期的记录。"""
+    terms: dict[str, set[str]] = {}
+    for record in records:
+        if record.status != STATUS_IN_PROGRESS:
+            continue
+        term = normalize_term(record.semester)
+        if term is None:
+            continue
+        terms.setdefault(record.course_code, set()).add(term)
+    return terms
 
 
 def record_schedule_conflicts(
@@ -322,19 +359,30 @@ def record_schedule_conflicts(
     chunks_by_code: Mapping[str, Sequence[str]],
     doc_id: str,
 ) -> TimeConflictFinding | None:
-    """所选记录自身 ``schedule`` 的确定性时间重叠；无法解析即不产生冲突。"""
-    entries: list[tuple[str, tuple[str, str, int, int]]] = []
+    """所选记录中**同学期在修课程**的确定性时间重叠。
+
+    只考虑 ``status=in_progress`` 且学期可识别的记录；学期不同或无法识别时不算冲突。
+    """
+    entries: list[tuple[str, str, tuple[str, str, int, int]]] = []
     for record in records:
+        if record.status != STATUS_IN_PROGRESS:
+            continue
+        term = normalize_term(record.semester)
+        if term is None:
+            continue
         interval = _schedule_interval(record.schedule)
-        if interval is not None:
-            entries.append((record.course_code, interval))
-    entries.sort(key=lambda item: (item[1][0], item[1][2], item[1][3], item[0]))
+        if interval is None:
+            continue
+        entries.append((term, record.course_code, interval))
+    entries.sort(key=lambda item: (item[0], item[2][0], item[2][2], item[2][3], item[1]))
 
     conflicting: set[str] = set()
     pairs: list[tuple[str, str]] = []
-    for index, (code, interval) in enumerate(entries):
-        for other_code, other_interval in entries[index + 1 :]:
-            if code == other_code or not _overlaps(interval, other_interval):
+    for index, (term, code, interval) in enumerate(entries):
+        for other_term, other_code, other_interval in entries[index + 1 :]:
+            if other_term != term or code == other_code:
+                continue
+            if not _overlaps(interval, other_interval):
                 continue
             conflicting.update((code, other_code))
             pairs.append(tuple(sorted((code, other_code))))
@@ -355,11 +403,36 @@ def record_schedule_conflicts(
     )
 
 
+def document_term(blocks: Sequence[DocumentBlock]) -> str | None:
+    """课表文档**自述**的适用学期（来自真实 ``DocumentBlock``）；缺失即返回 None。"""
+    for block in blocks:
+        pairs = labelled_pairs(block.text)
+        if "适用学期" in pairs:
+            term = normalize_term(pairs["适用学期"])
+            if term is not None:
+                return term
+        if (pairs.get("说明项") or "").strip() == "适用学期":
+            term = normalize_term(pairs.get("内容"))
+            if term is not None:
+                return term
+    return None
+
+
 def schedule_document_conflicts(
-    session: Session, active_version: str | None
+    session: Session,
+    active_version: str | None,
+    records: Sequence[CourseRecord],
 ) -> TimeConflictFinding | None:
-    """active demo 课表中真实存在的「同一时间段两门不同课程」；证据覆盖冲突双方来源。"""
+    """active demo 课表中**与所选记录相关**的真实重复排课。
+
+    只有当某个时间段里至少有一门课属于「所选记录中同学期的在修课程」时，该冲突才算相关；
+    证据仍覆盖发生冲突的**双方**课程来源。与所选记录无关的课表冲突不得附加到结果。
+    文档未声明适用学期时无法可靠匹配，直接跳过（不猜测）。
+    """
     if active_version is None:
+        return None
+    in_progress = in_progress_terms(records)
+    if not in_progress:
         return None
     documents = list(
         session.scalars(
@@ -385,6 +458,9 @@ def schedule_document_conflicts(
                 .order_by(DocumentBlock.block_index)
             ).all()
         )
+        term = document_term(blocks)
+        if term is None:
+            continue
         locators = load_chunk_locators(session, document.id)
         slots: dict[tuple[str, str], list[tuple[str, DocumentBlock]]] = {}
         for block in blocks:
@@ -399,7 +475,11 @@ def schedule_document_conflicts(
             slots.setdefault((weekday, period), []).append((code, block))
         for slot in sorted(slots):
             entries = slots[slot]
-            if len({code for code, _ in entries}) < 2:
+            codes = {code for code, _ in entries}
+            if len(codes) < 2:
+                continue
+            if not any(term in in_progress.get(code, ()) for code in codes):
+                # 该时间段与本次显式选择的记录无关：不得把课表冲突附加到结果
                 continue
             for _code, block in sorted(entries, key=lambda item: (item[0], item[1].block_index)):
                 chunk_id = evidence_backfill.resolve_chunk_by_block(
@@ -423,6 +503,27 @@ def schedule_document_conflicts(
 # ---------------------------------------------------------------------------
 
 
+def _displayable_locator(document: Document, locator: Mapping[str, object]) -> bool:
+    """定位必须能让前端**实际展示与跳转**；不完整时安全失败，绝不补默认页码或默认行号。
+
+    - XLSX：必须有非空 ``sheet_name`` 与合法的正整数行区间（``row_start <= row_end``）；
+    - PDF / DOCX：至少要有合法 ``page_number``（正整数）或非空 ``section_title``。
+    """
+    if document.file_type == constants.FILE_TYPE_XLSX:
+        sheet = locator.get("sheet_name")
+        if not isinstance(sheet, str) or not sheet.strip():
+            return False
+        start = locator.get("row_start")
+        end = locator.get("row_end")
+        if not _positive_int(start) or not _positive_int(end):
+            return False
+        return start <= end
+    if _positive_int(locator.get("page_number")):
+        return True
+    section = locator.get("section_title")
+    return isinstance(section, str) and bool(section.strip())
+
+
 def load_evidence(
     session: Session, expected: Mapping[str, str]
 ) -> tuple[PlanningEvidence, ...]:
@@ -439,8 +540,10 @@ def load_evidence(
         if expected.get(chunk.id) != document.id:
             raise ApiError(ACADEMIC_EVIDENCE_UNAVAILABLE, details={"reason": "doc_mismatch"})
         locator = dict(chunk.locator or {})
-        if not locator:
-            raise ApiError(ACADEMIC_EVIDENCE_UNAVAILABLE, details={"reason": "locator_missing"})
+        if not _displayable_locator(document, locator):
+            raise ApiError(
+                ACADEMIC_EVIDENCE_UNAVAILABLE, details={"reason": "locator_incomplete"}
+            )
         citation = dict(chunk.citation or {})
         collected[chunk.id] = PlanningEvidence(
             chunk_id=chunk.id,
@@ -523,7 +626,7 @@ def build_plan(
     finding = record_schedule_conflicts(records, record_chunks, record_doc)
     if finding is not None:
         findings.append(finding)
-    finding = schedule_document_conflicts(session, active_version)
+    finding = schedule_document_conflicts(session, active_version, records)
     if finding is not None:
         findings.append(finding)
     for finding in findings:
@@ -587,9 +690,12 @@ __all__ = [
     "SCHEDULE_DOC_CATEGORY",
     "TimeConflictFinding",
     "build_plan",
+    "document_term",
+    "in_progress_terms",
     "load_evidence",
     "load_records",
     "load_rule",
+    "normalize_term",
     "record_schedule_conflicts",
     "schedule_document_conflicts",
 ]
