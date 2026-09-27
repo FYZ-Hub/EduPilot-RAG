@@ -73,12 +73,14 @@ def build_status(session: Session, settings: Settings) -> dict:
         payload["last_job_id"] = previous.id
 
     active_pointer = session.scalar(
-        select(DemoActiveDataset).where(
-            DemoActiveDataset.dataset_version == settings.demo_dataset_version
-        )
+        select(DemoActiveDataset).order_by(DemoActiveDataset.activated_at.desc())
     )
     if active_pointer is not None:
+        # 返回真实的活动版本，即使它属于旧版本（serving_previous_version）
         payload["active_dataset_version"] = active_pointer.dataset_version
+        payload["serving_previous_version"] = (
+            active_pointer.dataset_version != settings.demo_dataset_version
+        )
 
     if not settings.demo_dataset_enabled:
         payload["state"] = constants.DEMO_STATE_DISABLED
@@ -111,10 +113,16 @@ def build_status(session: Session, settings: Settings) -> dict:
     payload["ready_documents"] = ready_documents
     payload["failed_documents"] = failed_documents
 
+    # loaded 必须严格匹配：唯一 active 指针 + 版本 + manifest + 当前流水线指纹 + 全部 ready
+    current_pipeline = pipeline_fingerprint(settings)
     loaded = (
         active_pointer is not None
+        and active_pointer.dataset_version == settings.demo_dataset_version
+        and active_pointer.manifest_sha256 == manifest.manifest_sha256
+        and active_pointer.pipeline_fingerprint == current_pipeline
         and len(manifest.documents) > 0
         and ready_documents == len(manifest.documents)
+        and failed_documents == 0
     )
     payload["loaded"] = loaded
 

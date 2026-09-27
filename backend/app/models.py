@@ -124,6 +124,7 @@ class DocumentChunk(Base):
 
     ``locator``（来源定位）参与 chunk_id 计算；
     ``citation``（文档级引用字段）用于生成引用，两者都只存 SQLite。
+    ``fts_rowid`` 记录该切片在 FTS5 表中的 rowid，用于精确删除与对账。
     """
 
     __tablename__ = "document_chunks"
@@ -139,6 +140,9 @@ class DocumentChunk(Base):
     parser_version: Mapped[str] = mapped_column(String(32), nullable=False)
     chunker_version: Mapped[str] = mapped_column(String(32), nullable=False)
     chunker_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    # FTS5 行号；与 FTS 记录一一对应，使删除与重建可以精确定位
+    # （唯一性由 init_database 的部分唯一索引保证，便于对既有数据库做增量迁移）
+    fts_rowid: Mapped[int | None] = mapped_column(Integer)
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
 
     document: Mapped[Document] = relationship(back_populates="chunks")
@@ -259,8 +263,9 @@ class DemoSeedJobDocument(Base):
 class DemoActiveDataset(Base):
     """active demo dataset 指针。
 
-    阶段 2B 只建立结构，**不得写入任何行**；只有全部文件达到最终 completed
-    并通过索引对账后才允许在单个事务中切换。
+    **全局最多一行**：``active_marker`` 与部分唯一索引共同保证任何时刻只有一个
+    active 数据集；切换在单个 SQLite 事务中完成（写入新指针并退役旧版本）。
+    只有当前 manifest 的全部文件达到最终 ``completed`` 并通过三方对账后才允许切换。
     """
 
     __tablename__ = "demo_active_dataset"
@@ -269,3 +274,5 @@ class DemoActiveDataset(Base):
     manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     pipeline_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
     activated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    # 活动行写常量 1；部分唯一索引只在 active_marker IS NOT NULL 时生效
+    active_marker: Mapped[int | None] = mapped_column(Integer, default=1)

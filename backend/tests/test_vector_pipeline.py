@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from sqlalchemy import select, update
+from sqlalchemy import func, select, text, update
 
 from tests.conftest import build_settings
 from app import constants
@@ -10,7 +10,13 @@ from app.core.errors import DOCUMENT_CHUNK_FAILED, ApiError
 from app.demo import service as demo_service
 from app.documents.fingerprint import CHUNKER_VERSION, pipeline_fingerprint, stage_fingerprints
 from app.embedding.base import descriptor_for
-from app.models import Document, DocumentBlock, DocumentChunk, DocumentPipelineState
+from app.models import (
+    DemoActiveDataset,
+    Document,
+    DocumentBlock,
+    DocumentChunk,
+    DocumentPipelineState,
+)
 from app.vector.store import VectorRecord
 from app.worker.runner import Worker
 
@@ -52,6 +58,21 @@ def _block_ids(context, document_id: str) -> list[int]:
                 .where(DocumentBlock.doc_id == document_id)
                 .order_by(DocumentBlock.id)
             )
+        )
+
+
+def _fts_ids(context, document_id: str) -> list[str]:
+    """该文档在 FTS5 中真实存在的 chunk_id 集合。"""
+    with context.session_factory() as session:
+        return sorted(
+            session.scalars(
+                text(
+                    "SELECT chunk_fts.chunk_id FROM chunk_fts "
+                    "JOIN document_chunks c ON c.fts_rowid = chunk_fts.rowid "
+                    "WHERE c.doc_id = :doc_id"
+                ),
+                {"doc_id": document_id},
+            ).all()
         )
 
 
@@ -109,7 +130,7 @@ def _spy_embeddings(monkeypatch, worker) -> dict:
 # --- 检查点与对账 -----------------------------------------------------------
 
 
-def test_documents_reach_vector_indexed_with_reconciled_records(worker, context) -> None:
+def test_documents_reach_completed_with_reconciled_records(worker, context) -> None:
     payload = _run_job(context, worker)
 
     assert payload["status"] == constants.JOB_COMPLETED
@@ -119,16 +140,20 @@ def test_documents_reach_vector_indexed_with_reconciled_records(worker, context)
         state = _state(context, document.id)
         chunk_ids = _chunk_ids(context, document.id)
         vector_ids = sorted(worker.vectors.vectors_for_document(document.id))
+        fts_ids = _fts_ids(context, document.id)
 
-        assert state.last_completed_stage == constants.STAGE_VECTOR_INDEXED
+        assert state.last_completed_stage == constants.STAGE_COMPLETED
         assert state.expected_chunk_count == len(chunk_ids) > 0
         assert state.vector_record_count == len(vector_ids)
-        # SQLite 预期集合与 Chroma 实际集合必须完全一致
+        assert state.fts_record_count == len(fts_ids)
+        # SQLite / Chroma / FTS5 三方集合必须完全一致
         assert set(vector_ids) == set(chunk_ids)
-        assert document.status == constants.STATUS_QUEUED
-        assert document.retrievable is False
+        assert set(fts_ids) == set(chunk_ids)
+        # 全部成功 → 原子激活 → demo 文档 ready 且可检索
+        assert document.status == constants.STATUS_READY
+        assert document.retrievable is True
         assert document.current_stage is None
-        assert document.activation_state == constants.ACTIVATION_CANDIDATE
+        assert document.activation_state == constants.ACTIVATION_ACTIVE
 
 
 def test_vector_metadata_is_scalar_and_complete(worker, context) -> None:
@@ -252,7 +277,7 @@ def test_crash_after_upsert_before_checkpoint_reuses_vectors(worker, context, mo
     assert calls["batches"] == 0
     assert calls["texts"] == 0
     assert set(worker.vectors.vectors_for_document(document.id)) == set(chunk_ids)
-    assert _state(context, document.id).last_completed_stage == constants.STAGE_VECTOR_INDEXED
+    assert _state(context, document.id).last_completed_stage == constants.STAGE_COMPLETED
 
 
 def test_missing_vector_is_repaired_precisely(worker, context, monkeypatch) -> None:
@@ -336,7 +361,7 @@ def test_parser_fingerprint_change_triggers_reparse(worker, context, monkeypatch
     # chunk_id 由「校验值 + 定位 + index + 版本」决定，因此集合保持稳定
     assert _chunk_ids(context, document.id) == original_chunks
     state = _state(context, document.id)
-    assert state.last_completed_stage == constants.STAGE_VECTOR_INDEXED
+    assert state.last_completed_stage == constants.STAGE_COMPLETED
     assert state.parser_fingerprint == stage_fingerprints(context.settings)["parser_fingerprint"]
     # 文本与版本都未变化 ⇒ 向量仍可安全复用，不得无谓调用 Embedding
     assert calls["batches"] == 0
@@ -373,7 +398,7 @@ def test_chunker_change_rebuilds_from_parsed_without_reparsing(
 
         state = _state(context, documents[0].id)
         assert state.chunker_fingerprint == stage_fingerprints(changed_settings)["chunker_fingerprint"]
-        assert state.last_completed_stage == constants.STAGE_VECTOR_INDEXED
+        assert state.last_completed_stage == constants.STAGE_COMPLETED
     finally:
         changed.stop()
 
@@ -411,7 +436,7 @@ def test_vector_schema_fingerprint_change_rebuilds_records(worker, context, monk
     assert _chunk_ids(context, document.id) == original_chunks
     assert calls["texts"] == len(original_chunks)
     state = _state(context, document.id)
-    assert state.last_completed_stage == constants.STAGE_VECTOR_INDEXED
+    assert state.last_completed_stage == constants.STAGE_COMPLETED
     assert (
         state.vector_schema_fingerprint
         == stage_fingerprints(context.settings)["vector_schema_fingerprint"]
@@ -491,6 +516,15 @@ def test_single_document_failure_does_not_rollback_others(worker, context, monke
     failed = [document for document in documents if not _chunk_ids(context, document.id)]
     assert len(failed) == 1
     assert worker.vectors.vectors_for_document(failed[0].id) == {}
+    assert _fts_ids(context, failed[0].id) == []
+    # 不完整版本绝不能激活：active 指针必须仍然为空
+    with context.session_factory() as session:
+        assert session.scalar(select(func.count(DemoActiveDataset.dataset_version))) == 0
+    assert all(
+        document.activation_state == constants.ACTIVATION_CANDIDATE
+        for document in documents
+        if document.status != constants.STATUS_FAILED
+    )
 
 
 def test_failed_document_resumes_after_fix(worker, context, monkeypatch) -> None:

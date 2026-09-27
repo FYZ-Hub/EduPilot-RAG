@@ -97,6 +97,55 @@ def vectors(settings):
 
 
 @pytest.fixture
+def ingest_demo(context, worker):
+    """执行一次完整演示导入并返回任务 payload。"""
+
+    def _run(settings=None) -> dict:
+        from app.demo import service as demo_service
+
+        target = settings or context.settings
+        with context.session_factory() as session:
+            job, _ = demo_service.seed_job(session, target)
+            session.commit()
+            job_id = job.id
+        worker.run_once()
+        with context.session_factory() as session:
+            return demo_service.serialize_job(
+                session, demo_service.get_job(session, job_id), target
+            )
+
+    return _run
+
+
+@pytest.fixture
+def search(context, worker):
+    """检索入口；每个调用使用独立短事务，返回脱离会话的数据类结果。"""
+    from types import SimpleNamespace
+
+    from app.search.dense import DenseRetriever
+    from app.search.hybrid import HybridRetriever
+    from app.search.keyword import KeywordRetriever
+
+    def _keyword(query, filters=None, top_k=None):
+        with context.session_factory() as session:
+            return KeywordRetriever(session, context.settings).search(query, filters, top_k)
+
+    def _dense(query, filters=None, top_k=None):
+        with context.session_factory() as session:
+            return DenseRetriever(
+                session, context.settings, worker.vectors, worker.embeddings
+            ).search(query, filters, top_k)
+
+    def _hybrid(query, filters=None, top_k=None):
+        with context.session_factory() as session:
+            return HybridRetriever(
+                session, context.settings, worker.vectors, worker.embeddings
+            ).search(query, filters, top_k)
+
+    return SimpleNamespace(keyword=_keyword, dense=_dense, hybrid=_hybrid)
+
+
+@pytest.fixture
 def writable_dataset(tmp_path) -> Path:
     """可写的演示数据集副本，用于 manifest 变化等场景。"""
     target = tmp_path / "demo"

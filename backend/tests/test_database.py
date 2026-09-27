@@ -196,6 +196,56 @@ def test_active_job_index_survives_reinitialisation(context) -> None:
     assert "uq_demo_seed_jobs_single_active" in indexes
 
 
+def test_init_database_migrates_legacy_schema_idempotently(tmp_path) -> None:
+    """沿用旧版本数据库启动时必须补齐新增列与索引，而不是直接崩溃。"""
+    from tests.conftest import build_settings
+    from app.db import create_db_engine, init_database
+
+    settings = build_settings(tmp_path)
+    engine = create_db_engine(settings)
+
+    # 构造“阶段 3 时期”的旧表结构：没有 active_marker / fts_rowid
+    with engine.begin() as connection:
+        connection.exec_driver_sql(
+            "CREATE TABLE demo_active_dataset ("
+            "dataset_version TEXT PRIMARY KEY, manifest_sha256 TEXT NOT NULL, "
+            "pipeline_fingerprint TEXT NOT NULL, activated_at DATETIME NOT NULL)"
+        )
+        connection.exec_driver_sql("CREATE TABLE document_chunks (id TEXT PRIMARY KEY)")
+
+    init_database(engine)
+    init_database(engine)  # 幂等
+
+    with engine.begin() as connection:
+        active_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(demo_active_dataset)").all()
+        }
+        chunk_columns = {
+            row[1]
+            for row in connection.exec_driver_sql("PRAGMA table_info(document_chunks)").all()
+        }
+        indexes = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'index'"
+            ).all()
+        }
+        tables = {
+            row[0]
+            for row in connection.exec_driver_sql(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).all()
+        }
+
+    assert "active_marker" in active_columns
+    assert "fts_rowid" in chunk_columns
+    assert "uq_demo_active_dataset_single" in indexes
+    assert "uq_document_chunks_fts_rowid" in indexes
+    assert "chunk_fts" in tables
+    engine.dispose()
+
+
 def test_utcnow_is_naive_utc() -> None:
     value = utcnow()
     assert value.tzinfo is None

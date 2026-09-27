@@ -5,7 +5,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, text
 
 from tests.conftest import demo_file, upload_file, upload_bytes
 from app import constants
@@ -28,17 +28,17 @@ def test_list_and_detail_after_demo_ingestion(client: TestClient, worker, contex
 
     listing = client.get("/api/documents").json()
     assert listing["total"] == 15
-    # parsed 文档不得被计为 ready / retrievable
-    assert listing["counts"]["ready"] == 0
-    assert listing["counts"]["retrievable"] == 0
+    # 全部成功并原子激活后：15 份均为 ready / retrievable / active
+    assert listing["counts"]["ready"] == 15
+    assert listing["counts"]["retrievable"] == 15
     assert listing["counts"]["failed"] == 0
-    assert listing["counts"]["processing"] == 15
+    assert listing["counts"]["processing"] == 0
 
     for item in listing["items"]:
         assert item["source_type"] == "demo"
-        assert item["status"] == constants.STATUS_QUEUED
-        assert item["retrievable"] is False
-        assert item["activation_state"] == constants.ACTIVATION_CANDIDATE
+        assert item["status"] == constants.STATUS_READY
+        assert item["retrievable"] is True
+        assert item["activation_state"] == constants.ACTIVATION_ACTIVE
         assert item["current_stage"] is None
         assert item["chunk_count"] > 0
         assert item["block_count"] > 0
@@ -57,9 +57,9 @@ def test_status_endpoint_matches_detail(client: TestClient, worker, context) -> 
 
     status = client.get(f"/api/documents/{document_id}/status").json()
     assert status["id"] == document_id
-    assert status["status"] == constants.STATUS_QUEUED
-    assert status["retrievable"] is False
-    assert status["activation_state"] == constants.ACTIVATION_CANDIDATE
+    assert status["status"] == constants.STATUS_READY
+    assert status["retrievable"] is True
+    assert status["activation_state"] == constants.ACTIVATION_ACTIVE
     assert status["current_stage"] is None
     assert status["error"] is None
 
@@ -236,13 +236,16 @@ def test_upload_after_delete_creates_new_document(client: TestClient) -> None:
     assert second.json()["document_id"] != first
 
 
-def test_upload_document_reaches_vector_indexed_not_ready(client: TestClient, worker, context) -> None:
+def test_upload_document_reaches_ready_after_reconciliation(
+    client: TestClient, worker, context
+) -> None:
+    """upload 不依赖 demo 整体激活：对账通过即 ready 且可检索。"""
     document_id = upload_file(client, demo_file("11-课表")).json()["document_id"]
     worker.run_once()
 
     status = client.get(f"/api/documents/{document_id}/status").json()
-    assert status["status"] == constants.STATUS_QUEUED
-    assert status["retrievable"] is False
+    assert status["status"] == constants.STATUS_READY
+    assert status["retrievable"] is True
     assert status["activation_state"] is None
     assert status["current_stage"] is None
     assert status["block_count"] > 0
@@ -253,14 +256,21 @@ def test_upload_document_reaches_vector_indexed_not_ready(client: TestClient, wo
             select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document_id)
         )
         assert state.last_completed_stage == constants.TARGET_STAGE
-        assert state.vector_record_count == state.expected_chunk_count > 0
+        assert (
+            state.vector_record_count
+            == state.fts_record_count
+            == state.expected_chunk_count
+            > 0
+        )
         chunk_ids = set(
             session.scalars(select(DocumentChunk.id).where(DocumentChunk.doc_id == document_id))
         )
+        fts_ids = set(session.scalars(text("SELECT chunk_id FROM chunk_fts")).all())
 
-    # 矢量已写入 Chroma，但文档仍不可检索（阶段 4 才会建立 FTS 与混合检索）
+    # 三方集合一致：SQLite chunk = Chroma 向量 = FTS 行
     assert chunk_ids
     assert set(worker.vectors.vectors_for_document(document_id)) == chunk_ids
+    assert chunk_ids <= fts_ids
 
 
 def test_upload_with_extra_field_still_accepts_single_file(client: TestClient) -> None:

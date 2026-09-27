@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 3 已完成（确定性语义切片与可恢复 Chroma 向量索引）**
-- 下一阶段：**阶段 4 — FTS5 与混合检索**
+- 当前阶段：**阶段 4 已完成（FTS5、混合检索与演示数据集原子激活）**
+- 下一阶段：**阶段 5 — Reranker**
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -14,7 +14,7 @@
 | 1 | Docker 前后端骨架 | completed |
 | 2 | 模拟语料、上传与解析 | completed |
 | 3 | 语义切片与 Chroma | completed |
-| 4 | FTS5 与混合检索 | not_started |
+| 4 | FTS5 与混合检索 | completed |
 | 5 | Reranker | not_started |
 | 6 | SSE 问答与引用 | not_started |
 | 7 | 确定性学分规则引擎 | not_started |
@@ -69,6 +69,28 @@
 - 验收命令：`docker compose build backend`、`docker compose up -d`、`docker compose exec backend pytest`（112 passed）、`docker run --rm --network none ... python -m pytest scripts`（72 passed）、`docker compose exec frontend pnpm test`（11 passed）、`docker compose exec frontend pnpm build`、`docker compose config`、`docker compose ps`、`Invoke-RestMethod http://localhost:8000/api/health`、`docker compose logs --no-color --tail 200`。
 - **边界**：本阶段 `target_stage` 仅为 `parsed`。15 份资料**仅达到 parsed**，`loaded` 始终为 `false`，`active_dataset_version` 为 `null`，`ready_documents=0`，`retrievable=false`；**未建立向量或 FTS 索引**，**未进入可检索知识库**，未写入 active demo dataset 指针。`/api/health` 继续 `degraded`，embedding/reranker `ready=false`，`chat=unconfigured`，`planning=unavailable`。演示 job 的 `completed` 只表示达到本任务 `target_stage=parsed`。
 
+## 阶段 4 结论（FTS5、混合检索与演示数据集原子激活）
+
+- 输出：`backend/app/search/`（`schema.py` FTS5 结构、`text.py` 确定性中文规范化与安全 MATCH 构造、`fts.py` 索引写入与精确对账、`eligibility.py` 可检索资格、`hydrate.py` 候选补全、`keyword.py` / `dense.py` / `hybrid.py` 三路检索）、`backend/app/demo/activation.py`（原子激活与退役）、`backend/app/api/retrieval.py`（`/api/sources/{chunk_id}`、`/api/retrieval/options`）、`backend/app/documents/categories.py`（类别中文标签）；`document_chunks.fts_rowid`、`demo_active_dataset.active_marker`；新增测试 `test_fts_index.py`、`test_keyword_retriever.py`、`test_retrieval_hybrid.py`、`test_reconciliation.py`、`test_activation.py`、`test_sources_api.py`。
+- 无新增第三方依赖：FTS5 为 SQLite 原生能力（sqlite 3.40.1），未引入外部搜索服务。
+- **FTS5**：虚拟表 `chunk_fts`，`tokenize = 'unicode61 remove_diacritics 2'`；`chunk_id`/`doc_id`/`fts_fingerprint` 为 `UNINDEXED`（身份字段不被分词）；索引 `title`、`body`（原始正文）、`course_code`、`file_name`、`doc_category`、`source_type`、`source_key`、`dataset_version`、`document_version`、`effective_from`、`major`、`grade_year`、`semester`。
+- **中文检索策略**：`unicode61` 把整段 CJK 当作**一个 token**（「学分认定」不会被切成「学分」「认定」），因此新增**确定性 CJK 二元组辅助列** `body_ngram`（`学分认定` → `学分 分认 认定`），查询侧使用同一套规范化逻辑（`FTS_NORMALIZATION_VERSION=1.0.0`、`FTS_NGRAM_VERSION=cjk-bigram-v1`，均进入 `fts_schema_fingerprint`）；**原始 chunk 正文不被修改**，不依赖网络或第三方在线服务。短中文词用 AND（精确）、长中文短语用 OR（召回），关键词命中即 OR；两类规则均为确定性常量。
+- **MATCH 构造**：所有 token 一律引号包裹（含单 token 查询词），空查询安全返回空、超长查询拒绝（`RETRIEVAL_QUERY_INVALID`）；引号/括号/减号/星号/冒号/`AND`/`OR`/`NOT`/`NEAR` 等 FTS 语法字符只能作为普通文本，SQL 注入与语法注入均不可能。实测未加引号的 `QM-CS201` 会触发 `no such column: CS201`，因此该规则是必需的。
+- **KeywordRetriever**（`keyword_top_k=12`）：SQLite FTS5 + BM25，`ORDER BY bm25 ASC, chunk_id ASC`，返回 `chunk_id`、`keyword_score(=-bm25)`、正文与完整引用元数据。
+- **DenseRetriever**（`dense_top_k=12`）：`EmbeddingProvider` + Chroma，查询向量维度必须与 Collection 一致（不一致抛 `EMBEDDING_DIMENSION_MISMATCH`）；候选先过采样再交 SQLite 复核，`dense_score = 1/(1+distance)`。
+- **HybridRetriever 与 RRF**：`score = Σ 1/(rrf_k + rank)`，`RRF_K=60`、`RRF_VERSION=rrf-v1`（版本化常量并进入诊断）；同一 `chunk_id` 只出现一次；排序固定为「fused_score 降序 → 最佳单路 rank → chunk_id 升序」。本阶段**不执行 Reranker**，输出即阶段 5 的候选输入。诊断只含安全统计（各路候选数、过滤器、耗时、provider/schema 版本、rrf_k、match_mode），不含密钥、绝对路径或整份正文。
+- **统一可检索资格**（Dense 与 Keyword 共用同一 SQL）：upload = `completed` + `ready` + `retrievable` + 未删除 + `activation_state IS NULL`；demo 需在此基础上 `activation_state='active'` 且 `dataset_version` 等于唯一 active 指针，且该指针的 `pipeline_fingerprint` 必须等于**当前运行配置**的流水线指纹——否则整套 demo 索引视为另一条流水线，必须重建而不可复用（切换 Provider 后 Fake 索引自动不可检索）。过滤字段固定为 `major` / `grade_year` / `semester` / `doc_category`，未知字段拒绝（`RETRIEVAL_FILTER_INVALID`）。
+- **三方对账与 completed**：`target_stage` 提升为 `completed`，路径为 `parsed → chunked → vector_indexed → keyword_indexed → 三方对账 → completed → demo 整体原子激活`。写 `completed` 前必须 **ID 集合**（SQLite chunk = Chroma 向量 = FTS 行）与三个计数（`expected_chunk_count` / `vector_record_count` / `fts_record_count`）全部一致；**仅计数相同但 ID 不同会判定失败**（`DOCUMENT_INDEX_FAILED`，`reason=fts_set_mismatch`）。`keyword_indexed` 的规范化写入、多余记录精确删除、ID 对账、计数与检查点在**同一个 SQLite 事务**内提交，不会出现「检查点成功但 FTS 记录不完整」。
+- **差异精确修复**：缺少 FTS 记录只补缺失、多余/孤儿 FTS 行只删多余（部分唯一索引 `uq_document_chunks_fts_rowid` 兜底）、`fts_schema_fingerprint` 变化只重建受影响记录且**不重新调用 Embedding**、Chroma 正确向量继续复用；其它文档记录不受影响；不做整库清空。
+- **数据集原子激活与退役**：`demo_active_dataset` 用 `active_marker` + 部分唯一索引保证**任何时刻只有一个 active 指针**；只有当前 manifest 的 15 个文档全部 `completed`、三方对账一致、无失败文档时才在**单个事务**内切换：写入/更新唯一指针，新版本 `status=ready` / `activation_state=active` / `retrievable=true`，旧版本立即 `inactive` / 不可检索。任何前置条件不满足都直接返回，旧指针不变、旧版本继续提供检索、新版本保持 `candidate`。
+- **upload 独立 ready**：upload 文档不依赖 demo 整体激活，单文档达到 `completed` 并对账后即 `ready` / `retrievable=true` / `activation_state=null`。
+- **公共 API**：`GET /api/sources/{chunk_id}` 只返回当前可检索 chunk，对 candidate / inactive / deleted / 未知 / 非法 ID 返回**完全一致**的 `SOURCE_NOT_FOUND`（不泄漏存在与否、路径或内部状态）；`GET /api/retrieval/options` 只从当前 ready 且 retrievable 的文档聚合，去重、稳定排序、空值不返回、无数据时为空数组，`doc_categories` 返回稳定 `value` 与中文 `label`。本阶段不新增规范外的公共调试搜索接口。
+- **幂等初始化增量迁移**：`init_database` 在 `create_all` 之后对**可加列**做幂等 `ALTER TABLE ADD COLUMN`（`demo_active_dataset.active_marker`、`document_chunks.fts_rowid`）并创建索引，使沿用旧版本数据卷的实例能够平滑升级而非启动崩溃。
+- **验收**：`docker compose exec backend pytest` → **243 passed**；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、`/api/demo/status` 全部符合预期。
+- **隔离 Fake 验收（临时 SQLite/Chroma/uploads + `APP_ENV=test` + `EMBEDDING_PROVIDER=fake` + `--network none`）**：首次 seed `completed`、`imported=15`；15 份文档全部 `completed`，**91 个稳定 chunk = 91 条 Chroma 向量 = 91 行 FTS**，三方集合与计数完全一致；`loaded=true`、`ready_documents=15`、`active_dataset_version=2026.1`、`serving_previous_version=false`；`/api/health` 的 `documents` 能力为 `ready`（整体仍 `degraded`，`chat=unconfigured`、`planning=unavailable`）；第二次 seed `imported=resumed=failed=0`、`skipped=15`，切片与 FTS 记录数仍为 91/91，无任何重复写入。
+- **默认 Local 轻量环境（项目默认数据卷）**：`EMBEDDING_PROVIDER=local` 且未安装 torch / sentence-transformers，**未下载任何模型**；`loaded=false`、`ready_documents=0`、`active_dataset_version=null`、`serving_previous_version=false`、`retrieval/options` 全为空数组、`/api/health` 的 `documents` 能力仍为 `unavailable`。阶段 3 遗留的 91 条 Fake 向量被正确识别为**指纹不匹配、不可检索的候选数据**（`documents` 中 `ready=0`、`retrievable=0`），**未被激活、未被当作 Local 向量使用、也未被删除**；切换到 Local/API Provider 后必须按新指纹重建向量与 FTS，不能复用 Fake 索引（已有回归测试覆盖）。
+- **边界**：阶段 4 不含 Reranker、Chat / SSE、LLM 调用、学分规划与前端业务页面；所有测试使用 Fake Provider，不访问网络、GPU、外部 API 或真实模型。
+
 ## 阶段 3 结论（确定性语义切片与可恢复 Chroma 向量索引）
 
 - 输出：`backend/app/embedding/`（Provider 抽象与 Fake/Local/API 实现、描述符、工厂）、`backend/app/documents/chunking/`（确定性 chunker 与稳定 chunk_id）、`backend/app/documents/metadata.py`（可选标量元数据派生）、`backend/app/vector/`（Chroma 封装 + 显式关闭遥测）、`document_chunks` 表、worker 的 `chunked` / `vector_indexed` 检查点、`backend/tests/test_chunking.py`、`test_embedding_provider.py`、`test_vector_store.py`、`test_vector_pipeline.py`、`test_vector_ownership.py`。
@@ -90,6 +112,7 @@
 ## 备注
 
 - 本文件仅用于阶段状态跟踪；业务实现、构建与测试均在 Docker 容器内执行。
-- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 固化模拟语料；阶段 2B 完成上传、解析与异步初始化；阶段 3 完成切片与向量索引，但 15 份资料与上传文档**仍未进入可检索知识库**（无 FTS、无混合检索、未激活数据集、`loaded=false`）。
+- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 固化模拟语料；阶段 2B 完成上传、解析与异步初始化；阶段 3 完成切片与向量索引；阶段 4 完成 FTS5、Dense/Keyword/RRF 混合检索、`completed` 检查点、三方对账与 demo 数据集原子激活。至此 15 份资料在**隔离 Fake 环境**中已进入可检索知识库（`loaded=true`）。
+- **默认 Local 环境仍未加载任何模型、未下载权重、未激活数据集**：`loaded=false`、`retrievable` 计数为 0。切换 Provider 必须按新 `pipeline_fingerprint` 重建向量与 FTS，**不得复用 Fake 索引**。
 - 语料生成/校验固定命令：在 `campus-rag-generator:1.0.0` 镜像内以 `--network none` 执行 `python scripts/generate_demo_corpus.py --output <dir> --seed 20260925`；固化到 `demo/` 必须显式追加 `--publish demo`。
-- 阶段 4 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/DEMO_DATA_SPEC.md` 实现 FTS5、Dense/Keyword 召回与 RRF 融合，并把 `target_stage` 提升为 `completed`。
+- 阶段 5 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/PRODUCT_SPEC.md` 实现 Reranker（本阶段未开始），其输入即本阶段 `HybridRetriever` 的候选结果。

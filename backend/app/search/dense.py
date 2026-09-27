@@ -1,0 +1,119 @@
+"""DenseRetriever：基于 EmbeddingProvider + ChromaVectorStore 的向量召回。
+
+Chroma 只负责给出候选与距离；候选仍需经 SQLite 资格过滤与元数据补全，
+绝不因为 Chroma metadata 声称可检索就采信。
+"""
+
+from __future__ import annotations
+
+from dataclasses import replace
+from typing import Any
+
+from sqlalchemy.orm import Session
+
+from app.config import Settings
+from app.core.errors import (
+    EMBEDDING_DIMENSION_MISMATCH,
+    RETRIEVAL_QUERY_INVALID,
+    ApiError,
+)
+from app.embedding.base import EmbeddingProvider
+from app.search.hydrate import build_scope, hydrate
+from app.search.types import RetrievalFilters, RetrievedChunk
+from app.vector.store import ChromaVectorStore
+
+# 候选过采样倍数：SQLite 侧会再过滤，留出余量以保证 top_k 结果
+DENSE_OVERSAMPLE = 4
+
+
+def chroma_where(filters: RetrievalFilters) -> dict[str, Any] | None:
+    """把允许的过滤条件翻译为 Chroma 标量过滤（仅作为预筛，最终以 SQLite 为准）。"""
+    conditions: dict[str, Any] = {}
+    if filters.major is not None:
+        conditions["major"] = filters.major
+    if filters.grade_year is not None:
+        conditions["grade_year"] = filters.grade_year
+    if filters.semester is not None:
+        conditions["semester"] = filters.semester
+    if filters.doc_category is not None:
+        conditions["doc_category"] = filters.doc_category
+    return conditions or None
+
+
+class DenseRetriever:
+    """向量召回；默认 ``dense_top_k=12``。"""
+
+    def __init__(
+        self,
+        session: Session,
+        settings: Settings,
+        vectors: ChromaVectorStore,
+        embeddings: EmbeddingProvider,
+    ):
+        self.session = session
+        self.settings = settings
+        self.vectors = vectors
+        self.embeddings = embeddings
+
+    def search(
+        self,
+        query: str,
+        filters: RetrievalFilters | None = None,
+        top_k: int | None = None,
+    ) -> list[RetrievedChunk]:
+        filters = filters or RetrievalFilters()
+        limit = int(top_k or self.settings.dense_top_k)
+        scope = build_scope(self.session, self.settings)
+
+        vector = self._embed_query(query)
+        collection = self.vectors.collection()
+        if collection.count() == 0:
+            return []
+
+        requested = min(int(collection.count()) or 1, max(limit, limit * DENSE_OVERSAMPLE))
+        where = chroma_where(filters)
+        result = collection.query(
+            query_embeddings=[vector],
+            n_results=requested,
+            where=where,
+            include=["distances"],
+        )
+        ids = list(result.get("ids") or [[]])[0]
+        distances = list(result.get("distances") or [[]])[0]
+        if not ids:
+            return []
+
+        hydrated = hydrate(self.session, list(ids), scope, filters)
+        results: list[RetrievedChunk] = []
+        for chunk_id, distance in zip(ids, distances):
+            chunk = hydrated.get(chunk_id)
+            if chunk is None:
+                continue
+            results.append(
+                replace(
+                    chunk,
+                    dense_rank=len(results) + 1,
+                    # 距离越小越相关；用 1/(1+d) 转成单调、有界的相似度分数
+                    dense_score=1.0 / (1.0 + float(distance)),
+                )
+            )
+            if len(results) >= limit:
+                break
+        return results
+
+    def _embed_query(self, query: str) -> list[float]:
+        if not (query or "").strip():
+            raise ApiError(
+                RETRIEVAL_QUERY_INVALID, details={"reason": "empty_query"}
+            )
+        vector = self.embeddings.embed_documents([query])[0]
+        expected = self.vectors.descriptor.dimension
+        if len(vector) != expected:
+            raise ApiError(
+                EMBEDDING_DIMENSION_MISMATCH,
+                details={"expected": expected, "actual": len(vector)},
+            )
+        return [float(value) for value in vector]
+
+
+__all__ = ["DENSE_OVERSAMPLE", "DenseRetriever", "chroma_where"]

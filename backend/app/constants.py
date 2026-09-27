@@ -89,8 +89,8 @@ STAGES = (
     STAGE_COMPLETED,
 )
 
-# 阶段 2B 只推进到 parsed；阶段 3 上调为 vector_indexed（阶段 4 再上调为 completed）
-TARGET_STAGE = STAGE_VECTOR_INDEXED
+# 阶段 2B 推进到 parsed，阶段 3 到 vector_indexed，阶段 4 到 completed（最终产品目标）
+TARGET_STAGE = STAGE_COMPLETED
 
 # Embedding Provider 种类（PRODUCT_SPEC 4.2 Provider 校验矩阵）
 EMBEDDING_PROVIDER_FAKE = "fake"

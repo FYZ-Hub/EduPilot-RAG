@@ -10,7 +10,7 @@ from types import SimpleNamespace
 
 import pytest
 from fastapi.testclient import TestClient
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.exc import IntegrityError
 
 from tests.conftest import DEMO_DATASET_PATH, build_settings
@@ -302,18 +302,38 @@ def test_repeated_ingestion_does_not_duplicate_blocks(client: TestClient, worker
     assert first_counts == second_counts
 
 
-def test_loaded_stays_false_after_ingestion(client: TestClient, worker, context) -> None:
+def test_loaded_requires_matching_version_manifest_and_pipeline(
+    client: TestClient, worker, context
+) -> None:
+    """激活后 loaded=true；只有版本 / manifest / 流水线指纹全部匹配才算已加载。"""
     client.post("/api/demo/seed")
     worker.run_once()
 
     payload = client.get("/api/demo/status").json()
-    assert payload["loaded"] is False
-    assert payload["active_dataset_version"] is None
-    assert payload["ready_documents"] == 0
-    assert payload["state"] == constants.DEMO_STATE_EMPTY
+    assert payload["loaded"] is True
+    assert payload["active_dataset_version"] == "2026.1"
+    assert payload["ready_documents"] == 15
+    assert payload["serving_previous_version"] is False
+    assert payload["state"] == constants.DEMO_STATE_LOADED
 
     with context.session_factory() as session:
-        assert session.scalar(select(func.count(DemoActiveDataset.dataset_version))) == 0
+        assert session.scalar(select(func.count(DemoActiveDataset.dataset_version))) == 1
+
+    # 指针的流水线指纹与当前配置不一致时（例如切换 Provider 后未重建）必须回落到未加载
+    with context.session_factory() as session:
+        session.execute(
+            update(DemoActiveDataset).values(pipeline_fingerprint="stale-pipeline")
+        )
+        session.commit()
+    degraded = client.get("/api/demo/status").json()
+    assert degraded["loaded"] is False
+    assert degraded["active_dataset_version"] == "2026.1"
+
+    # manifest 指纹不一致同样不得报告已加载
+    with context.session_factory() as session:
+        session.execute(update(DemoActiveDataset).values(manifest_sha256="0" * 64))
+        session.commit()
+    assert client.get("/api/demo/status").json()["loaded"] is False
 
 
 # --- 恢复 -------------------------------------------------------------------

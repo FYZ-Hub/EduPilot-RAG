@@ -178,8 +178,9 @@ def test_deleting_one_document_leaves_other_vectors_reconciled(client, worker, c
             state = session.scalar(
                 select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document.id)
             )
-        assert state.last_completed_stage == constants.STAGE_VECTOR_INDEXED
+        assert state.last_completed_stage == constants.STAGE_COMPLETED
         assert state.vector_record_count == len(_chunk_ids(context, document.id))
+        assert state.fts_record_count == state.expected_chunk_count
         assert set(worker.vectors.vectors_for_document(document.id)) == set(
             _chunk_ids(context, document.id)
         )

@@ -11,12 +11,31 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.models import Base
+from app.search.schema import ACTIVE_DATASET_INDEX_SQL, FTS_DDL
 
 # 部分唯一索引：保证全局最多一个 queued/running 演示任务。
 # 用 ``active_marker``（活动任务=1，终态=NULL）而不是 status，避免出现两个不同 status 的活动行。
 ACTIVE_JOB_INDEX_SQL = (
     "CREATE UNIQUE INDEX IF NOT EXISTS uq_demo_seed_jobs_single_active "
     "ON demo_seed_jobs(active_marker) WHERE active_marker IS NOT NULL"
+)
+
+# fts_rowid 的部分唯一索引：与 FTS 行一一对应（NULL 不参与唯一性）
+FT_SROWID_INDEX_SQL = (
+    "CREATE UNIQUE INDEX IF NOT EXISTS uq_document_chunks_fts_rowid "
+    "ON document_chunks(fts_rowid) WHERE fts_rowid IS NOT NULL"
+)
+
+INDEX_STATEMENTS = (
+    ACTIVE_JOB_INDEX_SQL,
+    ACTIVE_DATASET_INDEX_SQL,
+    FT_SROWID_INDEX_SQL,
+)
+
+# 可加列：旧数据库启动时幂等补齐，避免因缺失列导致初始化崩溃
+ADDITIVE_COLUMNS = (
+    ("demo_active_dataset", "active_marker", "INTEGER"),
+    ("document_chunks", "fts_rowid", "INTEGER"),
 )
 
 _SQLITE_PREFIX = "sqlite:///"
@@ -64,10 +83,29 @@ def create_db_engine(settings: Settings) -> Engine:
 
 
 def init_database(engine: Engine) -> None:
-    """幂等创建表与索引（重复调用不报错）。"""
+    """幂等创建表、索引与 FTS5 虚拟表（重复调用不报错）。
+
+    ``create_all`` **不会**给已存在的表补列，因此对新增的**可加列**做一次
+    幂等增量迁移，否则沿用旧数据库启动时会因为索引引用缺失列而直接崩溃。
+    """
     Base.metadata.create_all(engine)
     with engine.begin() as connection:
-        connection.exec_driver_sql(ACTIVE_JOB_INDEX_SQL)
+        _ensure_additive_columns(connection)
+        for statement in INDEX_STATEMENTS:
+            connection.exec_driver_sql(statement)
+        # FTS5 索引结构
+        connection.exec_driver_sql(FTS_DDL)
+
+
+def _ensure_additive_columns(connection) -> None:
+    """为既有表补齐新增的可加列（只做 ALTER TABLE ADD COLUMN，不删不改）。"""
+    for table, column, ddl_type in ADDITIVE_COLUMNS:
+        rows = connection.exec_driver_sql(f"PRAGMA table_info({table})").all()
+        if not rows:  # 表尚未创建
+            continue
+        existing = {row[1] for row in rows}
+        if column not in existing:
+            connection.exec_driver_sql(f"ALTER TABLE {table} ADD COLUMN {column} {ddl_type}")
 
 
 def create_session_factory(engine: Engine) -> sessionmaker[Session]:

@@ -16,6 +16,12 @@ import pymupdf4llm
 from app.config import Settings
 from app.core.hashing import stable_digest
 from app.embedding.base import descriptor_for
+from app.search.schema import (
+    FTS_NGRAM_VERSION,
+    FTS_NORMALIZATION_VERSION,
+    FTS_SCHEMA_VERSION,
+    FTS_TOKENIZER,
+)
 
 PARSER_NAME = "campus-rag-parser"
 PARSER_VERSION = "1.0.0"
@@ -23,8 +29,6 @@ NORMALIZATION_VERSION = "1.0.0"
 CHUNKER_VERSION = "1.0.0"
 VECTOR_COLLECTION_NAME = "campus_chunks_v1"
 VECTOR_SCHEMA_VERSION = "1.0.0"
-FTS_SCHEMA_VERSION = "1.0.0"
-FTS_TOKENIZER = "unicode61"
 
 PARSER_COMPONENTS: dict[str, str] = {
     "pdf": f"pymupdf4llm-{pymupdf4llm.__version__}",
@@ -48,7 +52,13 @@ def fingerprint_payload(settings: Settings) -> dict[str, Any]:
             "collection": VECTOR_COLLECTION_NAME,
             "version": VECTOR_SCHEMA_VERSION,
         },
-        "fts_schema": {"version": FTS_SCHEMA_VERSION, "tokenizer": FTS_TOKENIZER},
+        "fts_schema": {
+            "version": FTS_SCHEMA_VERSION,
+            "tokenizer": FTS_TOKENIZER,
+            # 中文检索规范化与 bigram 辅助列版本；变化即触发只重建 FTS
+            "normalization": FTS_NORMALIZATION_VERSION,
+            "ngram": FTS_NGRAM_VERSION,
+        },
     }
 
 

@@ -32,6 +32,7 @@ from app.models import (
     utcnow,
 )
 from app.documents.upload import PendingUpload
+from app.search import fts as fts_index
 
 if TYPE_CHECKING:  # pragma: no cover - 仅用于类型标注，避免运行期循环导入
     from app.vector.store import ChromaVectorStore
@@ -429,6 +430,8 @@ def delete_document(
         # 先清理外部向量：失败时向上抛出，避免出现「文档已消失但向量残留」
         vector_store.delete_document(document.id)
 
+    # FTS 行号记录在 chunk 行上，必须先按登记的 rowid 精确删除 FTS 记录
+    fts_index.delete_document_rows(session, document.id)
     session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document.id))
     session.execute(delete(DocumentBlock).where(DocumentBlock.doc_id == document.id))
     session.execute(

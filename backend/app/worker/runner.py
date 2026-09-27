@@ -26,15 +26,24 @@ from sqlalchemy.orm import Session, sessionmaker
 from app import constants
 from app.config import Settings
 from app.core.errors import (
+    DEMO_ACTIVATION_FAILED,
     DEMO_DATASET_CHANGED,
     DEMO_PIPELINE_CHANGED,
     DOCUMENT_CORRUPT,
     DOCUMENT_INDEX_FAILED,
+    DOCUMENT_KEYWORD_INDEX_FAILED,
     DOCUMENT_PARSE_FAILED,
     ApiError,
 )
 from app.db import session_scope
-from app.demo.manifest import DEMO_FILE_CHECKSUM_MISMATCH, ManifestDocument, load_manifest, sha256_file
+from app.demo.activation import activate_dataset
+from app.demo.manifest import (
+    DEMO_FILE_CHECKSUM_MISMATCH,
+    DemoManifest,
+    ManifestDocument,
+    load_manifest,
+    sha256_file,
+)
 from app.demo.service import job_documents, mark_job_failed
 from app.documents.chunking import ChunkSourceBlock, chunk_blocks
 from app.documents.fingerprint import (
@@ -61,6 +70,7 @@ from app.models import (
     DocumentPipelineState,
     utcnow,
 )
+from app.search import fts as fts_index
 from app.vector.store import ChromaVectorStore, VectorRecord
 from app.worker.lock import acquire_process_lock, default_lock_path
 
@@ -339,9 +349,9 @@ class Worker:
             # 关闭中：保留 running 状态与租约，由下次启动或租约过期恢复
             logger.info("job_interrupted job_id=%s", job_id)
             return
-        self._finalize_job(job_id)
+        self._finalize_job(job_id, manifest)
 
-    def _finalize_job(self, job_id: str) -> None:
+    def _finalize_job(self, job_id: str, manifest: DemoManifest) -> None:
         with session_scope(self.session_factory) as session:
             job = session.get(DemoSeedJob, job_id)
             if job is None:  # pragma: no cover
@@ -367,6 +377,37 @@ class Worker:
                 or 0
             )
 
+            if outstanding:
+                status = constants.JOB_FAILED
+            elif failed:
+                status = constants.JOB_COMPLETED_WITH_ERRORS
+            else:
+                status = constants.JOB_COMPLETED
+
+        # 全部文档成功时才尝试原子激活；失败/未完成一律不动旧 active 指针
+        activation_error: str | None = None
+        if status == constants.JOB_COMPLETED:
+            with session_scope(self.session_factory) as session:
+                outcome = activate_dataset(session, self.settings, manifest, self.vectors)
+            if outcome.activated:
+                logger.info(
+                    "dataset_activated job_id=%s dataset_version=%s retired=%s",
+                    job_id,
+                    outcome.dataset_version,
+                    outcome.retired_documents,
+                )
+            else:
+                activation_error = DEMO_ACTIVATION_FAILED
+                logger.warning(
+                    "dataset_activation_skipped job_id=%s reason=%s",
+                    job_id,
+                    outcome.reason or "-",
+                )
+
+        with session_scope(self.session_factory) as session:
+            job = session.get(DemoSeedJob, job_id)
+            if job is None:  # pragma: no cover
+                return
             job.imported_count = imported
             job.resumed_count = resumed
             job.skipped_count = skipped
@@ -376,14 +417,12 @@ class Worker:
             job.lease_expires_at = None
             job.finished_at = utcnow()
             job.active_marker = None
-            if outstanding:
-                job.status = constants.JOB_FAILED
-                job.error_code = job.error_code or DOCUMENT_PARSE_FAILED
-                job.error_message = job.error_message or "任务未完成全部文档"
-            elif failed:
+            if activation_error is not None:
                 job.status = constants.JOB_COMPLETED_WITH_ERRORS
+                job.error_code = activation_error
+                job.error_message = "演示数据集激活前置条件未满足"
             else:
-                job.status = constants.JOB_COMPLETED
+                job.status = status
             logger.info(
                 "job_finished job_id=%s status=%s imported=%s resumed=%s skipped=%s failed=%s",
                 job_id,
@@ -477,13 +516,17 @@ class Worker:
             or state.vector_schema_fingerprint != current["vector_schema_fingerprint"]
         ):
             return _min_stage(stage, constants.STAGE_CHUNKED)
+        if state.fts_schema_fingerprint != current["fts_schema_fingerprint"]:
+            # FTS 结构 / tokenizer / 中文规范化变化：保留 chunk 与正确向量，只重建 FTS
+            return _min_stage(stage, constants.STAGE_VECTOR_INDEXED)
         return stage
 
     def _verified_stage(self, stage: str, document_id: str, expected_sha256: str) -> str:
         """在分阶段指纹之上，再核对实际产物集合，得到可信的最早重建阶段。
 
-        只有「指纹一致」并且「切片集合与向量集合都对账一致」时，才能沿用检查点；
-        否则把阶段下调到对应的重建起点，让本次执行真正收敛，而不是报成功。
+        只有「指纹一致」并且「切片 / 向量 / FTS 三者集合与计数都对账一致」时，
+        才能沿用检查点；否则把阶段下调到对应的重建起点，让本次执行真正收敛。
+        **不允许仅凭计数相等判定成功，也不允许 ID 集合不一致时停留在 completed。**
         """
         with session_scope(self.session_factory) as session:
             state = session.scalar(
@@ -491,12 +534,15 @@ class Worker:
             )
             if state is None or state.file_sha256 != expected_sha256:
                 return constants.STAGE_NONE
-            expected_chunk_count = state.expected_chunk_count
-            expected_ids = list(
+            expected_chunk_count = int(state.expected_chunk_count or 0)
+            vector_record_count = int(state.vector_record_count or 0)
+            fts_record_count = int(state.fts_record_count or 0)
+            expected_ids = set(
                 session.scalars(
                     select(DocumentChunk.id).where(DocumentChunk.doc_id == document_id)
                 )
             )
+            fts_ids = fts_index.existing_ids(session, document_id)
 
         if not expected_ids or len(expected_ids) != expected_chunk_count:
             return _min_stage(stage, constants.STAGE_PARSED)
@@ -505,7 +551,7 @@ class Worker:
 
         current = stage_fingerprints(self.settings)
         existing = self.vectors.vectors_for_document(document_id)
-        if set(existing) != set(expected_ids):
+        if set(existing) != expected_ids or vector_record_count != len(expected_ids):
             return _min_stage(stage, constants.STAGE_CHUNKED)
         for metadata in existing.values():
             if metadata.get("embedding_fingerprint") != current["embedding_fingerprint"]:
@@ -514,6 +560,18 @@ class Worker:
                 return _min_stage(stage, constants.STAGE_CHUNKED)
             if metadata.get("chunker_version") != CHUNKER_VERSION:
                 return _min_stage(stage, constants.STAGE_CHUNKED)
+        if _stage_rank(stage) < _stage_rank(constants.STAGE_VECTOR_INDEXED):
+            return stage
+
+        with session_scope(self.session_factory) as session:
+            state = session.scalar(
+                select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document_id)
+            )
+            fts_fingerprint = state.fts_schema_fingerprint if state else None
+        if fts_fingerprint != current["fts_schema_fingerprint"]:
+            return _min_stage(stage, constants.STAGE_VECTOR_INDEXED)
+        if fts_ids != expected_ids or fts_record_count != len(expected_ids):
+            return _min_stage(stage, constants.STAGE_VECTOR_INDEXED)
         return stage
 
     def _ensure_demo_document(self, session: Session, manifest_document: ManifestDocument) -> Document:
@@ -709,6 +767,19 @@ class Worker:
             )
             self._index_vectors(document_id, owner, generation, log_id)
 
+        if rank < _stage_rank(constants.STAGE_KEYWORD_INDEXED):
+            self._set_document_status(
+                document_id,
+                owner,
+                generation,
+                constants.STATUS_KEYWORD_INDEXING,
+                constants.JOB_STAGE_KEYWORD_INDEXING,
+            )
+            self._index_keyword(document_id, owner, generation, log_id)
+
+        if rank < _stage_rank(constants.STAGE_COMPLETED):
+            self._finalize_document(document_id, owner, generation, log_id)
+
     def _set_document_status(
         self, document_id: str, owner: str, generation: int, status: str, current_stage: str
     ) -> None:
@@ -754,10 +825,11 @@ class Worker:
     def _persist_blocks(self, document_id: str, owner: str, generation: int, blocks) -> None:
         """单个事务内先持久化块，再提交 parsed 检查点；重试不产生重复块。
 
-        块变化意味着切片与向量都失效，因此同一事务内一并清理旧 chunk。
+        块变化意味着切片、向量与 FTS 都失效，因此同一事务内一并精确清理。
         """
         current = stage_fingerprints(self.settings)
         with session_scope(self.session_factory) as session:
+            fts_index.delete_document_rows(session, document_id)
             session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document_id))
             session.execute(delete(DocumentBlock).where(DocumentBlock.doc_id == document_id))
             session.add_all(
@@ -842,6 +914,8 @@ class Worker:
                 title=title,
             )
 
+            # 切片集合被替换：FTS 行号记录在旧 chunk 行上，必须先精确删除旧 FTS 记录
+            fts_index.delete_document_rows(session, document_id)
             session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document_id))
             session.add_all([DocumentChunk(**record) for record in records])
             session.execute(
@@ -852,6 +926,7 @@ class Worker:
                     chunker_fingerprint=chunker_fingerprint,
                     expected_chunk_count=len(records),
                     vector_record_count=0,
+                    fts_record_count=0,
                     failed_stage=None,
                     error_code=None,
                     error_message=None,
@@ -986,6 +1061,158 @@ class Worker:
             len(reconciled),
             reused,
             len(pending),
+        )
+
+    def _index_keyword(self, document_id: str, owner: str, generation: int, log_id: str) -> None:
+        """单个事务内完成 FTS 写入、精确增删、ID 对账与 keyword_indexed 检查点。
+
+        FTS5 与业务表同库，因此「索引记录 + 计数 + 检查点」要么一起提交、
+        要么一起回滚，不可能出现「检查点成功但 FTS 记录不完整」。
+        """
+        fingerprint = stage_fingerprints(self.settings)["fts_schema_fingerprint"]
+
+        with session_scope(self.session_factory) as session:
+            document = session.get(Document, document_id)
+            if document is None:  # pragma: no cover - 文档已被删除
+                raise ApiError(DOCUMENT_KEYWORD_INDEX_FAILED, retryable=False)
+            chunks = list(
+                session.scalars(
+                    select(DocumentChunk)
+                    .where(DocumentChunk.doc_id == document_id)
+                    .order_by(DocumentChunk.chunk_index)
+                )
+            )
+            if not chunks:
+                raise ApiError(DOCUMENT_KEYWORD_INDEX_FAILED, retryable=False)
+
+            values_by_chunk = {
+                chunk.id: fts_index.build_row_values(document, chunk, fingerprint)
+                for chunk in chunks
+            }
+            result = fts_index.reconcile_document(
+                session, document_id, values_by_chunk, fingerprint
+            )
+            expected_ids = {chunk.id for chunk in chunks}
+            actual_ids = fts_index.existing_ids(session, document_id)
+            if result.total != len(expected_ids) or actual_ids != expected_ids:
+                raise ApiError(
+                    DOCUMENT_KEYWORD_INDEX_FAILED,
+                    retryable=True,
+                    details={"reason": "fts_reconcile_mismatch"},
+                )
+
+            session.execute(
+                update(DocumentPipelineState)
+                .where(DocumentPipelineState.doc_id == document_id)
+                .values(
+                    last_completed_stage=constants.STAGE_KEYWORD_INDEXED,
+                    fts_schema_fingerprint=fingerprint,
+                    fts_record_count=len(actual_ids),
+                    failed_stage=None,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=utcnow(),
+                )
+            )
+
+        self._guarded_document_update(
+            document_id,
+            owner,
+            generation,
+            {
+                "status": next_status_for_stage(constants.STAGE_KEYWORD_INDEXED),
+                "current_stage": None,
+            },
+        )
+        logger.info(
+            "keyword_indexed log_id=%s doc_id=%s chunks=%s inserted=%s deleted=%s",
+            log_id,
+            document_id,
+            len(expected_ids),
+            result.inserted,
+            result.deleted,
+        )
+
+    def _finalize_document(self, document_id: str, owner: str, generation: int, log_id: str) -> None:
+        """三方 ID 集合与全部计数一致后才写 completed 检查点。"""
+        with session_scope(self.session_factory) as session:
+            document = session.get(Document, document_id)
+            state = session.scalar(
+                select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document_id)
+            )
+            if document is None or state is None:  # pragma: no cover
+                raise ApiError(DOCUMENT_INDEX_FAILED, retryable=False)
+            expected_ids = set(
+                session.scalars(
+                    select(DocumentChunk.id).where(DocumentChunk.doc_id == document_id)
+                )
+            )
+            counts = (
+                int(state.expected_chunk_count or 0),
+                int(state.vector_record_count or 0),
+                int(state.fts_record_count or 0),
+            )
+            fts_ids = fts_index.existing_ids(session, document_id)
+            source_type = document.source_type
+
+        if not expected_ids or any(count != len(expected_ids) for count in counts):
+            raise ApiError(
+                DOCUMENT_INDEX_FAILED, retryable=True, details={"reason": "count_mismatch"}
+            )
+        if fts_ids != expected_ids:
+            raise ApiError(
+                DOCUMENT_INDEX_FAILED, retryable=True, details={"reason": "fts_set_mismatch"}
+            )
+        if set(self.vectors.vectors_for_document(document_id)) != expected_ids:
+            raise ApiError(
+                DOCUMENT_INDEX_FAILED, retryable=True, details={"reason": "vector_set_mismatch"}
+            )
+
+        with session_scope(self.session_factory) as session:
+            session.execute(
+                update(DocumentPipelineState)
+                .where(DocumentPipelineState.doc_id == document_id)
+                .values(
+                    last_completed_stage=constants.STAGE_COMPLETED,
+                    failed_stage=None,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=utcnow(),
+                )
+            )
+
+        values: dict[str, Any] = {
+            "current_stage": None,
+            "attempt_count": 0,
+            "error_code": None,
+            "error_message": None,
+            "error_retryable": None,
+        }
+        if source_type == constants.SOURCE_UPLOAD:
+            # 上传文档不依赖 demo 整体激活：对账通过即可检索
+            values.update(
+                {
+                    "status": constants.STATUS_READY,
+                    "retrievable": True,
+                    "activation_state": None,
+                }
+            )
+        else:
+            # demo 文档在整体原子激活前保持候选态，不可检索
+            values.update(
+                {
+                    "status": constants.STATUS_QUEUED,
+                    "retrievable": False,
+                    "activation_state": constants.ACTIVATION_CANDIDATE,
+                }
+            )
+        self._guarded_document_update(document_id, owner, generation, values)
+        logger.info(
+            "document_completed log_id=%s doc_id=%s chunks=%s source=%s",
+            log_id,
+            document_id,
+            len(expected_ids),
+            source_type,
         )
 
     def _record_document_failure(

@@ -19,6 +19,7 @@ from app.api.demo import router as demo_router
 from app.api.deps import AppContext
 from app.api.documents import router as documents_router
 from app.api.health import router as health_router
+from app.api.retrieval import router as retrieval_router
 from app.config import Settings, get_settings
 from app.core.errors import (
     HTTP_ERROR,
@@ -129,6 +130,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(health_router, prefix="/api")
     application.include_router(documents_router, prefix="/api")
     application.include_router(demo_router, prefix="/api")
+    application.include_router(retrieval_router, prefix="/api")
     return application
 
 

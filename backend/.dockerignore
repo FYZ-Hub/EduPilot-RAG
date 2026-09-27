@@ -4,3 +4,17 @@ __pycache__/
 .mypy_cache/
 .ruff_cache/
 .venv/
+
+# 运行时数据绝不进入镜像：镜像里带旧数据库会导致 schema 变更无法生效
+# （create_all 对已存在的表不迁移），同时会把运行期文件与隐私数据打进镜像
+data/
+uploads/
+*.db
+*.db-wal
+*.db-shm
+models/
+
+# 环境与日志
+.env
+.env.*
+*.log
