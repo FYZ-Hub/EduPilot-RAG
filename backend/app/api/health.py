@@ -1,29 +1,30 @@
 """健康检查路由。
 
-阶段 1 尚未实现任何业务能力，因此必须如实降级：不得谎报 ready，
-也不得返回 Base URL、密钥、环境变量值或宿主机路径。
+阶段 2B 只完成上传与解析（达到 ``parsed``），尚未建立任何向量或 FTS 索引，
+因此文档能力仍不得声明为 ready，整体状态继续保持 ``degraded``。
 """
 
 from __future__ import annotations
 
 from fastapi import APIRouter, Depends
 
-from app.config import Settings, get_settings
+from app.api.deps import get_settings_dep
+from app.config import Settings
 from app.schemas.health import Capabilities, HealthResponse, ProviderStatus, Providers
 
 router = APIRouter(tags=["health"])
 
 
 @router.get("/health", response_model=HealthResponse)
-def read_health(settings: Settings = Depends(get_settings)) -> HealthResponse:
-    """返回进程状态与能力信息；阶段 1 固定为 degraded。"""
+def read_health(settings: Settings = Depends(get_settings_dep)) -> HealthResponse:
+    """返回进程状态与能力信息；未接入检索前固定为 degraded。"""
     return HealthResponse(
         status="degraded",
         version=settings.app_version,
         capabilities=Capabilities(
-            # 文档、规划能力在阶段 1 尚未实现。
+            # 上传与解析已可用，但完整文档检索能力（向量/FTS/引用）尚未建立
             documents="unavailable",
-            # 聊天能力依赖后续阶段实现与 LLM 配置，阶段 1 固定未配置。
+            # 聊天能力依赖后续阶段实现与 LLM 配置
             chat="unconfigured",
             planning="unavailable",
         ),

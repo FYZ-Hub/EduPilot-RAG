@@ -1,0 +1,44 @@
+"""FastAPI 依赖：应用上下文与会话。"""
+
+from __future__ import annotations
+
+from collections.abc import Iterator
+from dataclasses import dataclass
+
+from fastapi import Depends, Request
+from sqlalchemy import Engine
+from sqlalchemy.orm import Session, sessionmaker
+
+from app.config import Settings
+from app.worker.runner import Worker
+
+
+@dataclass
+class AppContext:
+    """进程级单例资源；由 ``create_app`` 装配。"""
+
+    settings: Settings
+    engine: Engine
+    session_factory: sessionmaker[Session]
+    worker: Worker
+
+
+def get_context(request: Request) -> AppContext:
+    return request.app.state.context
+
+
+def get_settings_dep(context: AppContext = Depends(get_context)) -> Settings:
+    return context.settings
+
+
+def get_session(context: AppContext = Depends(get_context)) -> Iterator[Session]:
+    """短事务会话：请求成功提交，异常回滚，始终关闭。"""
+    session = context.session_factory()
+    try:
+        yield session
+        session.commit()
+    except Exception:
+        session.rollback()
+        raise
+    finally:
+        session.close()

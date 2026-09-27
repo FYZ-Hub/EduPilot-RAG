@@ -1,0 +1,161 @@
+"""跨模块共享的状态枚举与常量。
+
+取值全部来自 ``docs/PRODUCT_SPEC.md`` 与 ``docs/DEMO_DATA_SPEC.md``，
+任何模块都不得自行扩展这些集合。
+"""
+
+from __future__ import annotations
+
+# 来源类型
+SOURCE_DEMO = "demo"
+SOURCE_UPLOAD = "upload"
+SOURCE_TYPES = (SOURCE_DEMO, SOURCE_UPLOAD)
+
+# 支持的文档格式
+FILE_TYPE_PDF = "pdf"
+FILE_TYPE_DOCX = "docx"
+FILE_TYPE_XLSX = "xlsx"
+FILE_TYPES = (FILE_TYPE_PDF, FILE_TYPE_DOCX, FILE_TYPE_XLSX)
+
+SUPPORTED_EXTENSIONS = {
+    ".pdf": FILE_TYPE_PDF,
+    ".docx": FILE_TYPE_DOCX,
+    ".xlsx": FILE_TYPE_XLSX,
+}
+
+MIME_TYPES = {
+    FILE_TYPE_PDF: "application/pdf",
+    FILE_TYPE_DOCX: "application/vnd.openxmlformats-officedocument.wordprocessingml.document",
+    FILE_TYPE_XLSX: "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+}
+
+# 声明 MIME 允许名单：上述正式 MIME 之外，仅容忍通用的二进制流声明
+GENERIC_MIME_TYPES = frozenset({"application/octet-stream", ""})
+
+# 公共文档处理状态（PRODUCT_SPEC 6.2）
+STATUS_QUEUED = "queued"
+STATUS_VALIDATING = "validating"
+STATUS_STORING = "storing"
+STATUS_PARSING = "parsing"
+STATUS_CHUNKING = "chunking"
+STATUS_EMBEDDING = "embedding"
+STATUS_VECTOR_INDEXING = "vector_indexing"
+STATUS_KEYWORD_INDEXING = "keyword_indexing"
+STATUS_READY = "ready"
+STATUS_FAILED = "failed"
+
+PUBLIC_STATUSES = (
+    STATUS_QUEUED,
+    STATUS_VALIDATING,
+    STATUS_STORING,
+    STATUS_PARSING,
+    STATUS_CHUNKING,
+    STATUS_EMBEDDING,
+    STATUS_VECTOR_INDEXING,
+    STATUS_KEYWORD_INDEXING,
+    STATUS_READY,
+    STATUS_FAILED,
+)
+
+ACTIVE_PUBLIC_STATUSES = (
+    STATUS_QUEUED,
+    STATUS_VALIDATING,
+    STATUS_STORING,
+    STATUS_PARSING,
+    STATUS_CHUNKING,
+    STATUS_EMBEDDING,
+    STATUS_VECTOR_INDEXING,
+    STATUS_KEYWORD_INDEXING,
+)
+
+# 流水线检查点（DEMO_DATA_SPEC 5.2）
+STAGE_NONE = "none"
+STAGE_VALIDATED = "validated"
+STAGE_STORED = "stored"
+STAGE_PARSED = "parsed"
+STAGE_CHUNKED = "chunked"
+STAGE_VECTOR_INDEXED = "vector_indexed"
+STAGE_KEYWORD_INDEXED = "keyword_indexed"
+STAGE_COMPLETED = "completed"
+
+STAGES = (
+    STAGE_NONE,
+    STAGE_VALIDATED,
+    STAGE_STORED,
+    STAGE_PARSED,
+    STAGE_CHUNKED,
+    STAGE_VECTOR_INDEXED,
+    STAGE_KEYWORD_INDEXED,
+    STAGE_COMPLETED,
+)
+
+# 阶段 2B 只推进到 parsed；后续阶段会依次上调该常量
+TARGET_STAGE = STAGE_PARSED
+
+# 激活状态
+ACTIVATION_ACTIVE = "active"
+ACTIVATION_CANDIDATE = "candidate"
+ACTIVATION_INACTIVE = "inactive"
+ACTIVATION_STATES = (ACTIVATION_ACTIVE, ACTIVATION_CANDIDATE, ACTIVATION_INACTIVE)
+
+# 演示任务状态（DEMO_DATA_SPEC 5.1）
+JOB_QUEUED = "queued"
+JOB_RUNNING = "running"
+JOB_COMPLETED = "completed"
+JOB_COMPLETED_WITH_ERRORS = "completed_with_errors"
+JOB_FAILED = "failed"
+
+JOB_STATUSES = (JOB_QUEUED, JOB_RUNNING, JOB_COMPLETED, JOB_COMPLETED_WITH_ERRORS, JOB_FAILED)
+JOB_ACTIVE_STATUSES = (JOB_QUEUED, JOB_RUNNING)
+
+# 逐文档任务状态与结果
+JOB_DOC_PENDING = "pending"
+JOB_DOC_RUNNING = "running"
+JOB_DOC_COMPLETED = "completed"
+JOB_DOC_FAILED = "failed"
+JOB_DOC_SKIPPED = "skipped"
+
+JOB_DOC_STATUSES = (JOB_DOC_PENDING, JOB_DOC_RUNNING, JOB_DOC_COMPLETED, JOB_DOC_FAILED, JOB_DOC_SKIPPED)
+
+RESULT_IMPORTED = "imported"
+RESULT_RESUMED = "resumed"
+RESULT_SKIPPED = "skipped"
+RESULT_FAILED = "failed"
+JOB_RESULTS = (RESULT_IMPORTED, RESULT_RESUMED, RESULT_SKIPPED, RESULT_FAILED)
+
+# 任务级 current_stage（DEMO_DATA_SPEC 7.3）
+JOB_STAGE_VALIDATING = "validating"
+JOB_STAGE_STORING = "storing"
+JOB_STAGE_PARSING = "parsing"
+JOB_STAGE_CHUNKING = "chunking"
+JOB_STAGE_EMBEDDING = "embedding"
+JOB_STAGE_VECTOR_INDEXING = "vector_indexing"
+JOB_STAGE_KEYWORD_INDEXING = "keyword_indexing"
+JOB_STAGE_ACTIVATING = "activating"
+
+JOB_CURRENT_STAGES = (
+    JOB_STAGE_VALIDATING,
+    JOB_STAGE_STORING,
+    JOB_STAGE_PARSING,
+    JOB_STAGE_CHUNKING,
+    JOB_STAGE_EMBEDDING,
+    JOB_STAGE_VECTOR_INDEXING,
+    JOB_STAGE_KEYWORD_INDEXING,
+    JOB_STAGE_ACTIVATING,
+)
+
+# 演示数据集概况状态（DEMO_DATA_SPEC 7.1）
+DEMO_STATE_DISABLED = "disabled"
+DEMO_STATE_UNAVAILABLE = "unavailable"
+DEMO_STATE_EMPTY = "empty"
+DEMO_STATE_QUEUED = "queued"
+DEMO_STATE_RUNNING = "running"
+DEMO_STATE_PARTIAL = "partial"
+DEMO_STATE_LOADED = "loaded"
+DEMO_STATE_FAILED = "failed"
+
+# 上传处置语义（PRODUCT_SPEC 6.2）
+DISPOSITION_CREATED = "created"
+DISPOSITION_ATTACHED = "attached"
+DISPOSITION_EXISTING_READY = "existing_ready"
+DISPOSITION_RETRY_STARTED = "retry_started"

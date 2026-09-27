@@ -84,6 +84,14 @@ class Settings(BaseSettings):
     demo_dataset_version: str = "2026.1"
     demo_job_poll_seconds: int = 2
     demo_job_lease_seconds: int = 60
+    demo_document_max_attempts: int = 3
+
+    # 内置 worker（FastAPI lifespan 启停；测试可显式关闭）
+    worker_enabled: bool = True
+    worker_poll_seconds: float = 0.5
+
+    # SQLite
+    sqlite_busy_timeout_ms: int = 5000
 
     @property
     def cors_origin_list(self) -> list[str]:
@@ -94,6 +102,15 @@ class Settings(BaseSettings):
     def llm_configured(self) -> bool:
         """只返回 LLM 是否具备最小配置，不暴露任何配置值。"""
         return bool(self.llm_base_url and self.llm_model and self.llm_api_key)
+
+    @property
+    def max_upload_bytes(self) -> int:
+        return self.max_upload_mb * 1024 * 1024
+
+    @property
+    def upload_tmp_path(self) -> str:
+        """上传落盘前的受控临时目录，与最终存储同处数据卷以便原子移动。"""
+        return f"{self.upload_path.rstrip('/')}/.tmp"
 
 
 @lru_cache(maxsize=1)
