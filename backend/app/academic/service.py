@@ -55,6 +55,9 @@ RECORD_DOC_CATEGORY = "course_records"
 RULE_DOC_CATEGORY = "degree_plan"
 DOCUMENT_READY = "ready"
 PROJECTION_READY = "ready"
+# 集合的激活状态：只有当前 active dataset 的 demo 集合为 active，其它 demo 版本一律 inactive
+ACTIVATION_ACTIVE = "active"
+ACTIVATION_INACTIVE = "inactive"
 
 
 @dataclass(frozen=True)
@@ -351,6 +354,8 @@ def project_active_demo(session: Session, settings: Settings) -> ProjectionRepor
             created_rules += 1
         else:
             skipped += 1
+    # 状态对账与投影落库处于同一事务；即使本次全部 skipped 也必须执行
+    _sync_demo_activation(session, dataset_version)
     session.flush()
     return ProjectionReport(
         dataset_version=dataset_version,
@@ -358,6 +363,26 @@ def project_active_demo(session: Session, settings: Settings) -> ProjectionRepor
         rule_sets=created_rules,
         skipped=skipped,
     )
+
+
+def _sync_demo_activation(session: Session, dataset_version: str) -> None:
+    """把 active dataset 的 demo 集合写为 active，其它 demo 版本统一退役为 inactive。
+
+    只处理 ``source_type == "demo"``：upload 来源自有其激活语义，完全不参与本次对账。
+    不删除任何旧集合，只切换状态；对同一输入是幂等的。
+    """
+    for model in (AcademicRecordSet, AcademicRuleSet):
+        rows = session.scalars(
+            select(model).where(model.source_type == DEMO_SOURCE_TYPE)
+        ).all()
+        for row in rows:
+            desired = (
+                ACTIVATION_ACTIVE
+                if row.dataset_version == dataset_version
+                else ACTIVATION_INACTIVE
+            )
+            if row.activation_state != desired:
+                row.activation_state = desired
 
 
 def _existing_projection(

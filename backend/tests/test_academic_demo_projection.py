@@ -482,6 +482,141 @@ def test_projection_is_consistent_after_repeated_seed(projected, worker) -> None
         assert _counts(session) == before
 
 
+# --- BUG-7B-05：demo 学业集合的 active / inactive 状态 ---------------------
+
+
+def test_current_demo_sets_are_marked_active(projected) -> None:
+    with projected.session_factory() as session:
+        for model in (AcademicRecordSet, AcademicRuleSet):
+            states = set(
+                session.scalars(
+                    select(model.activation_state).where(model.source_type == "demo")
+                ).all()
+            )
+            assert states == {"active"}, f"{model.__name__} 的当前 demo 集合必须为 active"
+
+
+def test_switching_demo_version_retires_previous_sets_only(projected) -> None:
+    """旧 demo 版本退役为 inactive；upload 集合完全不受影响。"""
+    from app.models import Document as Doc
+
+    with projected.session_factory() as session:
+        stale_document = Doc(
+            source_type="demo",
+            source_key="demo:2025.0:corpus/01-培养方案.pdf",
+            file_name="01-培养方案.pdf",
+            file_type="pdf",
+            mime_type="application/pdf",
+            sha256="2" * 64,
+            doc_category="degree_plan",
+            status="ready",
+            retrievable=True,
+        )
+        upload_document = Doc(
+            source_type="upload",
+            source_key="upload:manual.xlsx",
+            file_name="manual.xlsx",
+            file_type="xlsx",
+            mime_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            sha256="3" * 64,
+            doc_category="degree_plan",
+            status="ready",
+            retrievable=True,
+        )
+        session.add_all([stale_document, upload_document])
+        session.flush()
+        stale_set = AcademicRuleSet(
+            source_type="demo",
+            source_key="demo:2025.0:corpus/01-培养方案.pdf",
+            dataset_version="2025.0",
+            activation_state="active",
+            status="ready",
+            display_name="计算机科学与技术培养方案 2025.0",
+            major="计算机科学与技术",
+            admission_year=2025,
+            rule_version="2025.0",
+            required_credits="150.0",
+            content_hash="stale",
+            source_doc_id=stale_document.id,
+        )
+        upload_set = AcademicRuleSet(
+            source_type="upload",
+            source_key="upload:manual.xlsx",
+            activation_state="active",
+            status="ready",
+            display_name="上传 · 培养方案",
+            major="计算机科学与技术",
+            admission_year=2025,
+            rule_version="manual",
+            required_credits="150.0",
+            content_hash="upload",
+            source_doc_id=upload_document.id,
+        )
+        session.add_all([stale_set, upload_set])
+        session.commit()
+        stale_id, upload_id = stale_set.id, upload_set.id
+
+    with projected.session_factory() as session:
+        project_active_demo(session, projected.settings)
+        session.commit()
+
+    with projected.session_factory() as session:
+        assert session.get(AcademicRuleSet, stale_id).activation_state == "inactive", (
+            "旧 demo 版本必须退役"
+        )
+        assert session.get(AcademicRuleSet, upload_id).activation_state == "active", (
+            "upload 集合不得参与 demo 状态切换"
+        )
+        assert session.get(AcademicRuleSet, stale_id) is not None, "不得删除旧 demo 集合"
+        for model in (AcademicRecordSet, AcademicRuleSet):
+            current = session.scalars(
+                select(model.activation_state).where(
+                    model.source_type == "demo",
+                    model.dataset_version == projected.settings.demo_dataset_version,
+                )
+            ).all()
+            assert set(current) == {"active"}
+
+
+def test_activation_state_sync_runs_when_everything_is_skipped(projected) -> None:
+    """全部指纹相同被跳过时，状态对账仍必须执行且保持稳定。"""
+    with projected.session_factory() as session:
+        report = project_active_demo(session, projected.settings)
+        session.commit()
+    assert report.skipped == 4, "第二次执行应全部跳过"
+
+    with projected.session_factory() as session:
+        for model in (AcademicRecordSet, AcademicRuleSet):
+            states = set(
+                session.scalars(
+                    select(model.activation_state).where(model.source_type == "demo")
+                ).all()
+            )
+            assert states == {"active"}
+
+
+def test_activation_state_is_stable_across_restart(projected) -> None:
+    from app.db import create_db_engine, create_session_factory
+
+    with projected.session_factory() as session:
+        project_active_demo(session, projected.settings)
+        session.commit()
+
+    engine = create_db_engine(projected.settings)
+    with create_session_factory(engine)() as session:
+        project_active_demo(session, projected.settings)
+        session.commit()
+    with create_session_factory(engine)() as session:
+        for model in (AcademicRecordSet, AcademicRuleSet):
+            states = set(
+                session.scalars(
+                    select(model.activation_state).where(model.source_type == "demo")
+                ).all()
+            )
+            assert states == {"active"}
+    engine.dispose()
+
+
 def test_projection_rows_are_ready(projected) -> None:
     with projected.session_factory() as session:
         assert set(session.scalars(select(AcademicProjection.status)).all()) == {

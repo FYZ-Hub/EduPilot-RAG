@@ -101,11 +101,22 @@
 - 只投影唯一 active demo dataset 中 `ready` 且可检索的文档；`source_type`/`source_key` 保持 demo 与 upload 独立所有权，upload 集合不因 demo 切换被删除或失效。
 - `source_key` 是模型内部的来源所有权字段，允许并必须落库；显示名只用安全文件名/真实提取字段推导，不含宿主绝对路径、uploads 存储路径、学号或姓名。
 
-**外键删除语义（回归修复）**
+**外键删除语义与旧库迁移（回归修复 + BUG-7B-04）**
 
 - 学业表的 `source_doc_id → documents.id` 使用 `ON DELETE CASCADE`（投影随来源文档消亡）；`source_chunk_id → document_chunks.id` 使用 `ON DELETE SET NULL`（切片是来源定位而非所有权）。
 - 这是必需的：否则一旦存在学业投影，既有的文档删除 / 重新解析（会先删 `document_chunks`）就会被外键挡住，报 `FOREIGN KEY constraint failed`。已有阶段 1–7A 回归测试覆盖该路径。
+- **旧库迁移**：SQLAlchemy 的 `create_all` **不会**修改既有表的外键，阶段 7A 建库时 `source_doc_id` / `source_chunk_id` 仍是 `NO ACTION`。`init_database` 现在会按 SQLite 官方推荐流程**幂等重建**这 6 张学业表（关闭外键 → 打开 `legacy_alter_table` → 改旧表名 → 按当前模型建表 → 拷数据 → 删旧表 → 重建索引），整个过程在**单个事务**内完成，先执行 `PRAGMA foreign_key_check`（必须为空）再提交，失败即回滚；不删除数据库、不要求重建数据卷、不丢任何 record / rule / projection 行。
+- 迁移后 `PRAGMA foreign_key_list` 与全新数据库**逐列一致**，重复执行两次结果不变、行数不变。
 - `source_chunk_id` 保存的是**真实存在的切片 ID**，切片被置空后由下一次投影对账重建，不伪造 ID。
+
+### 阶段 7B-1 收尾修复轮（BUG-7B-04 / BUG-7B-05）
+
+阶段 7 仍为 `in_progress`，`/api/health` 的 `planning` 仍为 `unavailable`；本轮只修复两个已复现缺陷，**未实现** `POST /api/academic/records/import`、`POST /api/academic/rules/import`、`GET /api/academic/options`、`POST /api/academic/plan`，未进入 7B-2。
+
+- **BUG-7B-04（旧 SQLite 数据库外键未迁移）**：`init_database` 此前只有 `ALTER TABLE ADD COLUMN` 增量迁移，`create_all` 又不会改写既有外键，因此沿用阶段 7A 数据卷的实例中 `source_doc_id` / `source_chunk_id` 仍为 `NO ACTION`，文档删除 / 重新解析会被外键挡住。已新增上述幂等表重建迁移，并在**真实开发数据卷**上实测：迁移前五张表均为 `NO ACTION`，迁移后 `source_doc_id=CASCADE`、`source_chunk_id=SET NULL`，`PRAGMA foreign_key_check` 为空，各表行数不变（迁移前后均为 0）。
+- **BUG-7B-05（demo 学业集合缺少 active / inactive 状态）**：投影落库时未写 `activation_state`，也没有退役旧 demo 版本，同一来源可能同时存在多个「可用」集合。现在投影落库与状态对账处于**同一事务**：唯一 active dataset 的 demo record / rule set 写为 `active`，其它 demo 版本统一为 `inactive`，`upload` 来源完全不参与；旧集合只退役**不删除**，不静默选择某个 rule set，且即使本次 seed 全部 `skipped` 也会执行状态对账。
+- 两个缺陷均先补**修复前失败测试**（各 4 项失败、退出码 1）再修复，修复后定向与全量测试退出码 0。
+- **测试编辑更正（非产品缺陷）**：新增迁移测试最初的期望表把 `record_set_id: CASCADE` 也套用到 `academic_projections`，而模型对投影的定义是 `ON DELETE SET NULL`；已改为按表声明期望值，并在修复前重新采集失败证据。
 
 ### 阶段 7A 修复轮（契约与冲突 warning）
 
