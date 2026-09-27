@@ -79,6 +79,9 @@ class Document(Base):
     blocks: Mapped[list["DocumentBlock"]] = relationship(
         back_populates="document", cascade="all, delete-orphan", passive_deletes=True
     )
+    chunks: Mapped[list["DocumentChunk"]] = relationship(
+        back_populates="document", cascade="all, delete-orphan", passive_deletes=True
+    )
     pipeline_state: Mapped["DocumentPipelineState | None"] = relationship(
         back_populates="document", cascade="all, delete-orphan", passive_deletes=True, uselist=False
     )
@@ -114,6 +117,36 @@ class DocumentBlock(Base):
     document: Mapped[Document] = relationship(back_populates="blocks")
 
     __table_args__ = (UniqueConstraint("doc_id", "block_index", name="uq_document_blocks_doc_index"),)
+
+
+class DocumentChunk(Base):
+    """确定性切片结果；``id`` 为稳定 chunk_id，``chunk_index`` 在同一文档内唯一。
+
+    ``locator``（来源定位）参与 chunk_id 计算；
+    ``citation``（文档级引用字段）用于生成引用，两者都只存 SQLite。
+    """
+
+    __tablename__ = "document_chunks"
+
+    id: Mapped[str] = mapped_column(String(64), primary_key=True)
+    doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    chunk_index: Mapped[int] = mapped_column(Integer, nullable=False)
+    text: Mapped[str] = mapped_column(Text, nullable=False)
+    locator: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    citation: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    parser_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    chunker_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    chunker_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    document: Mapped[Document] = relationship(back_populates="chunks")
+
+    __table_args__ = (
+        UniqueConstraint("doc_id", "chunk_index", name="uq_document_chunks_doc_index"),
+        Index("ix_document_chunks_doc_id", "doc_id"),
+    )
 
 
 class DocumentPipelineState(Base):

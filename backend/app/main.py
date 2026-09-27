@@ -100,11 +100,16 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         version=resolved.app_version,
         lifespan=_lifespan,
     )
+    worker = Worker(resolved, session_factory)
+    # Embedding Provider 与向量库由 worker 持有，全进程复用同一实例：
+    # 构造阶段不加载模型、不下载权重、不发起网络请求。
     application.state.context = AppContext(
         settings=resolved,
         engine=engine,
         session_factory=session_factory,
-        worker=Worker(resolved, session_factory),
+        worker=worker,
+        embeddings=worker.embeddings,
+        vectors=worker.vectors,
     )
 
     # 先加请求上下文，再加 CORS，使 CORS 位于最外层（错误响应也带跨域头）

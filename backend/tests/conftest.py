@@ -14,7 +14,10 @@ from fastapi.testclient import TestClient
 
 from app.config import Settings
 from app.db import create_db_engine, create_session_factory, init_database
+from app.embedding.base import descriptor_for
+from app.embedding.factory import build_embedding_provider
 from app.main import create_app
+from app.vector.store import ChromaVectorStore
 from app.worker.runner import Worker
 
 DEMO_DATASET_PATH = Path("/app/demo")
@@ -23,14 +26,20 @@ DEMO_MANIFEST_PATH = DEMO_DATASET_PATH / "manifest.json"
 
 
 def build_settings(tmp_path: Path, **overrides) -> Settings:
-    """构造隔离的测试配置：临时数据库、临时上传目录、显式关闭后台线程。"""
+    """构造隔离的测试配置：临时数据库、临时上传/Chroma 目录、Fake Provider、关闭后台线程。
+
+    全部阶段 3 测试只使用 FakeEmbeddingProvider：不访问网络、不下载模型、不依赖 GPU。
+    """
     values: dict = {
         "app_env": "test",
         "log_level": "WARNING",
         "database_url": f"sqlite:///{tmp_path / 'app.db'}",
         "upload_path": str(tmp_path / "uploads"),
+        "chroma_path": str(tmp_path / "chroma"),
+        "model_cache_path": str(tmp_path / "models"),
         "demo_dataset_path": str(DEMO_DATASET_PATH),
         "demo_dataset_version": "2026.1",
+        "embedding_provider": "fake",
         "worker_enabled": False,
         "worker_poll_seconds": 0.05,
         "demo_job_poll_seconds": 1,
@@ -69,6 +78,22 @@ def worker(context) -> Worker:
     assert instance.prepare()
     yield instance
     instance.stop()
+
+
+@pytest.fixture
+def embeddings(settings):
+    """Fake Embedding Provider：确定性、离线、1024 维。"""
+    provider = build_embedding_provider(settings)
+    yield provider
+    provider.close()
+
+
+@pytest.fixture
+def vectors(settings):
+    """隔离的临时 Chroma 目录，不污染正式 data/。"""
+    store = ChromaVectorStore(settings, descriptor_for(settings))
+    yield store
+    store.close()
 
 
 @pytest.fixture

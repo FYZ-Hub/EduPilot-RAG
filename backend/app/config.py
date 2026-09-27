@@ -51,6 +51,11 @@ class Settings(BaseSettings):
     embedding_dimension: int = 1024
     embedding_device: Device = "cpu"
     embedding_batch_size: int = 4
+    # 显式模型 revision；留空时使用 Provider 内置的固定快照，绝不跟随可变 main
+    embedding_revision: str = ""
+    embedding_timeout_seconds: int = 30
+    # 本地 Provider 默认只读缓存，不隐式下载权重（权重需预先放入 MODEL_CACHE_PATH）
+    embedding_local_files_only: bool = True
 
     # Reranker（阶段 1 不加载模型）
     rerank_provider: ProviderKind = "local"

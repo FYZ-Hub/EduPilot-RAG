@@ -80,7 +80,7 @@ def test_second_seed_is_pure_skip_and_never_touches_storage(tmp_path) -> None:
         assert first["imported"] == 15
         assert first["processed"] == 15
         assert first["progress_percent"] == 100
-        assert {item["last_completed_stage"] for item in first["documents"]} == {constants.STAGE_PARSED}
+        assert {item["last_completed_stage"] for item in first["documents"]} == {constants.TARGET_STAGE}
 
         before = snapshot(context.session_factory)
 

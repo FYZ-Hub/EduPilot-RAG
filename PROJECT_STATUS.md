@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 2 已完成（阶段 2A、阶段 2B 均完成）**
-- 下一阶段：**阶段 3 — 语义切片与 Chroma**
+- 当前阶段：**阶段 3 已完成（确定性语义切片与可恢复 Chroma 向量索引）**
+- 下一阶段：**阶段 4 — FTS5 与混合检索**
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -13,7 +13,7 @@
 | 0 | 环境预检 | completed |
 | 1 | Docker 前后端骨架 | completed |
 | 2 | 模拟语料、上传与解析 | completed |
-| 3 | 语义切片与 Chroma | not_started |
+| 3 | 语义切片与 Chroma | completed |
 | 4 | FTS5 与混合检索 | not_started |
 | 5 | Reranker | not_started |
 | 6 | SSE 问答与引用 | not_started |
@@ -69,9 +69,27 @@
 - 验收命令：`docker compose build backend`、`docker compose up -d`、`docker compose exec backend pytest`（112 passed）、`docker run --rm --network none ... python -m pytest scripts`（72 passed）、`docker compose exec frontend pnpm test`（11 passed）、`docker compose exec frontend pnpm build`、`docker compose config`、`docker compose ps`、`Invoke-RestMethod http://localhost:8000/api/health`、`docker compose logs --no-color --tail 200`。
 - **边界**：本阶段 `target_stage` 仅为 `parsed`。15 份资料**仅达到 parsed**，`loaded` 始终为 `false`，`active_dataset_version` 为 `null`，`ready_documents=0`，`retrievable=false`；**未建立向量或 FTS 索引**，**未进入可检索知识库**，未写入 active demo dataset 指针。`/api/health` 继续 `degraded`，embedding/reranker `ready=false`，`chat=unconfigured`，`planning=unavailable`。演示 job 的 `completed` 只表示达到本任务 `target_stage=parsed`。
 
+## 阶段 3 结论（确定性语义切片与可恢复 Chroma 向量索引）
+
+- 输出：`backend/app/embedding/`（Provider 抽象与 Fake/Local/API 实现、描述符、工厂）、`backend/app/documents/chunking/`（确定性 chunker 与稳定 chunk_id）、`backend/app/documents/metadata.py`（可选标量元数据派生）、`backend/app/vector/`（Chroma 封装 + 显式关闭遥测）、`document_chunks` 表、worker 的 `chunked` / `vector_indexed` 检查点、`backend/tests/test_chunking.py`、`test_embedding_provider.py`、`test_vector_store.py`、`test_vector_pipeline.py`、`test_vector_ownership.py`。
+- 新增固定依赖：`chromadb==0.5.23`（Apache-2.0）、`numpy==2.1.3`（BSD-3-Clause）、`httpx==0.28.1`（BSD-3-Clause，OpenAI 兼容 Embedding 客户端）。
+- 本地 BGE-M3 运行时依赖**不进默认镜像**，单独固定在 `backend/requirements-embedding-local.txt`（torch BSD-3-Clause / sentence-transformers Apache-2.0 / transformers、huggingface-hub Apache-2.0），需显式安装并提供权重后才可用。
+- 切片：`DocumentChunker` 版本 `1.0.0`，目标 550 字 / 重叠 100 字，Unicode NFC + 固定空白折叠；优先按标题、段落、表格行、工作表、中文句读切分，最后才按安全字符边界切分；表格行原子不可拆且自动补表头；定位组 `(page_number, sheet_name, section_title)` 变化即断章，课程代码/学分/日期不会被切断。
+- `chunk_id = SHA256(document_checksum + canonical_locator + chunk_index + parser_version + chunker_version)`，其中 `document_checksum = SHA256(source_type + source_key + 文件 SHA-256)`。**说明**：仅使用文件 SHA-256 会让「同一文件同时存在于 demo 与 upload」产生相同 chunk_id，与「demo / upload 即使 SHA 相同也必须完全独立」冲突并在 SQLite 主键上真实碰撞；绑定来源键后保持公式形状、确定性，并保证跨来源互不复用。公式不含时间、UUID、绝对路径或数据库自增 ID。
+- Embedding：`EmbeddingProvider` 统一接口（`embed_documents` / `dimension` / `provider_name` / `model_name` / `revision` / `fingerprint` / `close|release`）。Fake 为 SHA-256 派生确定性单位向量（1024 维，离线）；Local 延迟导入 + 延迟加载 `BAAI/bge-m3`，revision 固定为 `5617a9f61b028005a4858fdac845db406aefb181`，默认 `local_files_only=true`（不隐式下载权重），`cuda` 仅由 GPU 覆盖启用且不可用时明确失败；API 走 OpenAI 兼容接口，错误与指纹均不含密钥。`APP_ENV=production` 拒绝 Fake。
+- Chroma：`PersistentClient`（`CHROMA_PATH`）、Collection 固定 `campus_chunks_v1`、显式关闭遥测（`chroma_product_telemetry_impl=app.vector.telemetry.NoopTelemetry`，实测不再尝试上报）、始终显式传入向量（占位 Embedding 函数禁止隐式调用）、metadata 仅标量且无 null；启动/首次使用时校验 collection 名称、schema 版本、维度与 provider/model/revision，不一致安全失败。
+- SQLite：新增 `document_chunks`（`id` = 稳定 chunk_id、`chunk_index` 唯一、`locator`/`citation` JSON、parser/chunker 版本与指纹）；`document_pipeline_state` 的分阶段指纹只在对应阶段**实际完成时**写入（此前若提前刷新会让定向重建静默失效）。
+- worker：路径变为 `parsed → chunked → embedding（非检查点） → Chroma upsert → 对账 → vector_indexed`；服务端 `target_stage` 提升为 `vector_indexed`。跳过判定 = 分阶段指纹一致 **且** 切片集合/向量集合对账一致；对账不通过时把阶段下调到对应的重建起点并真正收敛（不会“报成功但索引缺失”）。
+- 崩溃恢复：Chroma upsert 后、检查点前崩溃时，重启复用 `embedding_fingerprint` / `vector_schema_fingerprint` 正确的既有向量，不再调用 Embedding；只补缺失、只删多余、只重建版本不符的记录。
+- 指纹定向重建：解析器/规范化变化 → 回退 `stored`（重新解析）；切片配置或 chunker 版本变化 → 回退 `parsed`（保留块，重新切片）；Embedding 身份或向量 schema 变化 → 回退 `chunked`（保留 chunk，仅重建向量）。
+- 删除：`DELETE /api/documents/{id}` 同步清理该 `doc_id` 的 SQLite 切片与 Chroma 向量；upload 额外删除运行时可执行文件，demo 绝不修改只读 `/app/demo`；不提供整库清空接口。
+- 实测（Chroma / demo 验收按约定使用 FakeEmbeddingProvider，容器内 `--network none`）：首次 seed `completed`、`imported=15`；15 份文档 `last_completed_stage=vector_indexed`，91 个 chunk = 91 条向量，0 个文档对账不一致；第二次 seed `skipped=15`、`imported=resumed=failed=0`，无重复记录。
+- 验收命令：`docker compose build backend`、`docker compose up -d`、`docker compose exec backend pytest`（170 passed）、`docker run --rm --network none … python -m pytest scripts`（72 passed）、`docker compose exec frontend pnpm test`（11 passed）、`docker compose exec frontend pnpm build`、`docker compose config --quiet`、`docker compose ps`、`Invoke-RestMethod /api/health`、`docker compose logs --no-color --tail 200`。
+- **边界**：15 份资料**仅达到 `vector_indexed`**；`loaded=false`、`ready_documents=0`、`active_dataset_version=null`、`retrievable=false`；**未建立 FTS5**、**未实现混合检索**、**未写入 active dataset 指针**、**未把文档标记为 ready**；公共文档状态继续安全投影为 `queued`。`/api/health` 继续 `degraded`（`documents=unavailable`、`chat=unconfigured`、`planning=unavailable`），`embedding.ready` 与 `reranker.ready` 均为 `false`（本地权重未加载时不谎报）。默认 Compose 仍为 `EMBEDDING_PROVIDER=local`；在未安装本地可选依赖前，容器内演示导入会在 embedding 阶段以 `EMBEDDING_PROVIDER_UNAVAILABLE` 安全失败，不会静默回退。
+
 ## 备注
 
 - 本文件仅用于阶段状态跟踪；业务实现、构建与测试均在 Docker 容器内执行。
-- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 只固化模拟语料；阶段 2B 完成上传、解析与异步初始化，但语料/上传文档**仍未进入可检索知识库**（无向量、无 FTS，`loaded=false`）。
+- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 固化模拟语料；阶段 2B 完成上传、解析与异步初始化；阶段 3 完成切片与向量索引，但 15 份资料与上传文档**仍未进入可检索知识库**（无 FTS、无混合检索、未激活数据集、`loaded=false`）。
 - 语料生成/校验固定命令：在 `campus-rag-generator:1.0.0` 镜像内以 `--network none` 执行 `python scripts/generate_demo_corpus.py --output <dir> --seed 20260925`；固化到 `demo/` 必须显式追加 `--publish demo`。
-- 阶段 3 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/DEMO_DATA_SPEC.md` 实现语义切片与 Chroma 向量索引（本阶段未开始）。
+- 阶段 4 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/DEMO_DATA_SPEC.md` 实现 FTS5、Dense/Keyword 召回与 RRF 融合，并把 `target_stage` 提升为 `completed`。

@@ -9,7 +9,7 @@ from sqlalchemy import func, select
 
 from tests.conftest import demo_file, upload_file, upload_bytes
 from app import constants
-from app.models import Document, DocumentBlock, DocumentPipelineState
+from app.models import Document, DocumentBlock, DocumentChunk, DocumentPipelineState
 
 
 def _run_demo_job(context, worker) -> str:
@@ -40,7 +40,7 @@ def test_list_and_detail_after_demo_ingestion(client: TestClient, worker, contex
         assert item["retrievable"] is False
         assert item["activation_state"] == constants.ACTIVATION_CANDIDATE
         assert item["current_stage"] is None
-        assert item["chunk_count"] == 0
+        assert item["chunk_count"] > 0
         assert item["block_count"] > 0
         assert item["locator_types"]
         assert "/app/" not in str(item)
@@ -236,7 +236,7 @@ def test_upload_after_delete_creates_new_document(client: TestClient) -> None:
     assert second.json()["document_id"] != first
 
 
-def test_upload_document_reaches_parsed_not_ready(client: TestClient, worker, context) -> None:
+def test_upload_document_reaches_vector_indexed_not_ready(client: TestClient, worker, context) -> None:
     document_id = upload_file(client, demo_file("11-课表")).json()["document_id"]
     worker.run_once()
 
@@ -246,12 +246,21 @@ def test_upload_document_reaches_parsed_not_ready(client: TestClient, worker, co
     assert status["activation_state"] is None
     assert status["current_stage"] is None
     assert status["block_count"] > 0
+    assert status["chunk_count"] > 0
 
     with context.session_factory() as session:
         state = session.scalar(
             select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document_id)
         )
-        assert state.last_completed_stage == constants.STAGE_PARSED
+        assert state.last_completed_stage == constants.TARGET_STAGE
+        assert state.vector_record_count == state.expected_chunk_count > 0
+        chunk_ids = set(
+            session.scalars(select(DocumentChunk.id).where(DocumentChunk.doc_id == document_id))
+        )
+
+    # 矢量已写入 Chroma，但文档仍不可检索（阶段 4 才会建立 FTS 与混合检索）
+    assert chunk_ids
+    assert set(worker.vectors.vectors_for_document(document_id)) == chunk_ids
 
 
 def test_upload_with_extra_field_still_accepts_single_file(client: TestClient) -> None:

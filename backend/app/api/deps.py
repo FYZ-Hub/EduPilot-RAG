@@ -1,4 +1,4 @@
-"""FastAPI 依赖：应用上下文与会话。"""
+"""FastAPI 依赖：应用上下文、会话与向量资源。"""
 
 from __future__ import annotations
 
@@ -10,6 +10,8 @@ from sqlalchemy import Engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
+from app.embedding.base import EmbeddingProvider
+from app.vector.store import ChromaVectorStore
 from app.worker.runner import Worker
 
 
@@ -21,6 +23,8 @@ class AppContext:
     engine: Engine
     session_factory: sessionmaker[Session]
     worker: Worker
+    embeddings: EmbeddingProvider
+    vectors: ChromaVectorStore
 
 
 def get_context(request: Request) -> AppContext:

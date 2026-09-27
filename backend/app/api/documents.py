@@ -62,14 +62,20 @@ def list_documents(session: Session = Depends(get_session)) -> dict:
 def read_document(document_id: str, session: Session = Depends(get_session)) -> dict:
     document = service.get_document(session, document_id)
     counts = service.block_counts(session, [document.id])
-    return service.serialize_detail(document, counts.get(document.id, 0))
+    chunks = service.chunk_counts(session, [document.id])
+    return service.serialize_detail(
+        document, counts.get(document.id, 0), chunks.get(document.id, 0)
+    )
 
 
 @router.get("/{document_id}/status")
 def read_document_status(document_id: str, session: Session = Depends(get_session)) -> dict:
     document = service.get_document(session, document_id)
     counts = service.block_counts(session, [document.id])
-    return service.status_payload(document, counts.get(document.id, 0))
+    chunks = service.chunk_counts(session, [document.id])
+    return service.status_payload(
+        document, counts.get(document.id, 0), chunks.get(document.id, 0)
+    )
 
 
 @router.get("/{document_id}/preview")
@@ -85,5 +91,6 @@ def delete_document(
     session: Session = Depends(get_session),
 ) -> Response:
     document = service.get_document(session, document_id)
-    service.delete_document(session, document, context.settings)
+    # 同步清理该文档的 Chroma 向量；只作用于本 doc_id，不做整库清空
+    service.delete_document(session, document, context.settings, context.vectors)
     return Response(status_code=204)

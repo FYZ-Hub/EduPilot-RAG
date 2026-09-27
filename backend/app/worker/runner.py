@@ -1,7 +1,12 @@
-"""应用内单 worker：SQLite 持久队列、租约、检查点恢复与逐文档重试。
+"""应用内单 worker：SQLite 持久队列、租约、检查点恢复、向量索引与逐文档重试。
 
 日志只记录 job id、doc id、阶段与错误码，不记录正文、隐私信息、密钥或宿主机路径。
 同一进程内绝不嵌套写事务：每个阶段使用独立的短事务。
+
+阶段 3 的文档路径：
+``parsed → chunked → embedding（非独立检查点） → Chroma upsert → Chroma 对账 → vector_indexed``
+SQLite 与 Chroma 无法组成事务，因此用「确定性 chunk_id + upsert + 指纹 + 集合对账」
+保证至少一次执行产生恰好一次的数据效果。
 """
 
 from __future__ import annotations
@@ -24,23 +29,39 @@ from app.core.errors import (
     DEMO_DATASET_CHANGED,
     DEMO_PIPELINE_CHANGED,
     DOCUMENT_CORRUPT,
+    DOCUMENT_INDEX_FAILED,
     DOCUMENT_PARSE_FAILED,
     ApiError,
 )
 from app.db import session_scope
 from app.demo.manifest import DEMO_FILE_CHECKSUM_MISMATCH, ManifestDocument, load_manifest, sha256_file
 from app.demo.service import job_documents, mark_job_failed
-from app.documents.fingerprint import pipeline_fingerprint, stage_fingerprints
+from app.documents.chunking import ChunkSourceBlock, chunk_blocks
+from app.documents.fingerprint import (
+    CHUNKER_VERSION,
+    PARSER_VERSION,
+    pipeline_fingerprint,
+    stage_fingerprints,
+)
 from app.documents.parsing import parse_document
-from app.documents.service import ensure_pipeline_state
+from app.documents.service import (
+    build_chunk_records,
+    chunk_vector_metadata,
+    ensure_pipeline_state,
+    next_status_for_stage,
+)
+from app.embedding.base import descriptor_for
+from app.embedding.factory import build_embedding_provider
 from app.models import (
     DemoSeedJob,
     DemoSeedJobDocument,
     Document,
     DocumentBlock,
+    DocumentChunk,
     DocumentPipelineState,
     utcnow,
 )
+from app.vector.store import ChromaVectorStore, VectorRecord
 from app.worker.lock import acquire_process_lock, default_lock_path
 
 logger = logging.getLogger("app.worker")
@@ -67,6 +88,17 @@ def _stage_rank(stage: str | None) -> int:
         return constants.STAGES.index(stage or constants.STAGE_NONE)
     except ValueError:  # pragma: no cover - 非法检查点按 none 处理
         return 0
+
+
+def _min_stage(left: str, right: str) -> str:
+    """返回两阶段中更早的一个（用于指纹失效时回退检查点）。"""
+    return left if _stage_rank(left) <= _stage_rank(right) else right
+
+
+def _batched(items: list, size: int):
+    step = max(1, int(size))
+    for start in range(0, len(items), step):
+        yield items[start : start + step]
 
 
 def requeue_interrupted_uploads(session: Session) -> int:
@@ -120,6 +152,9 @@ class Worker:
         self.settings = settings
         self.session_factory = session_factory
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
+        self.descriptor = descriptor_for(settings)
+        self.embeddings = build_embedding_provider(settings)
+        self.vectors = ChromaVectorStore(settings, self.descriptor)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
         self._executor = ThreadPoolExecutor(max_workers=1, thread_name_prefix="document-parse")
@@ -153,6 +188,11 @@ class Worker:
             self._thread.join(timeout)
             self._thread = None
         self._executor.shutdown(wait=False)
+        try:
+            self.embeddings.close()
+            self.vectors.close()
+        except Exception:  # noqa: BLE001 - 关闭阶段不得抛出
+            logger.warning("worker_cleanup_failed worker_id=%s", self.worker_id)
         if self._lock is not None:
             self._lock.release()
             self._lock = None
@@ -378,6 +418,7 @@ class Worker:
             document = self._ensure_demo_document(session, manifest_document)
             state = ensure_pipeline_state(session, document, self.settings)
             previous_stage = state.last_completed_stage
+            effective_stage = self._effective_stage(state, previous_stage)
             state_id = state.id
             document.lease_owner = self.worker_id
             document.lease_generation = int(document.lease_generation or 0) + 1
@@ -388,11 +429,14 @@ class Worker:
             owner = document.lease_owner
             generation = document.lease_generation
 
-        if self._should_skip(document_id, manifest_document, constants.TARGET_STAGE):
+        effective_stage = self._verified_stage(
+            effective_stage, document_id, manifest_document.sha256
+        )
+        if _stage_rank(effective_stage) >= _stage_rank(constants.TARGET_STAGE):
             return DocumentOutcome(
                 result=constants.RESULT_SKIPPED,
                 status=constants.JOB_DOC_SKIPPED,
-                last_completed_stage=constants.STAGE_PARSED,
+                last_completed_stage=constants.TARGET_STAGE,
                 doc_id=document_id,
                 pipeline_state_id=state_id,
             )
@@ -407,23 +451,70 @@ class Worker:
             generation=generation,
             checksum_error_code=DEMO_FILE_CHECKSUM_MISMATCH,
             previous_stage=previous_stage,
+            start_stage=effective_stage,
+            title=manifest_document.title,
             log_id=job_id,
         )
 
-    def _should_skip(
-        self, document_id: str, manifest_document: ManifestDocument, target_stage: str
-    ) -> bool:
-        """相同来源键、校验值与指纹，且已达到 target_stage 时跳过。"""
+    def _effective_stage(self, state: DocumentPipelineState, stored_stage: str) -> str:
+        """按分阶段指纹决定最早需要重新执行的检查点。
+
+        - 解析器 / 规范化变化：``parsed`` 阶段本身失效 → 回退到 ``stored``（重新解析）
+        - 切片配置或 chunker 版本变化：``chunked`` 失效 → 回退到 ``parsed``（保留块，重新切片）
+        - Embedding 身份或向量 schema 变化：保留有效 chunk → 回退到 ``chunked``（只重建向量）
+        """
+        current = stage_fingerprints(self.settings)
+        stage = stored_stage or constants.STAGE_NONE
+        if (
+            state.parser_fingerprint != current["parser_fingerprint"]
+            or state.normalization_fingerprint != current["normalization_fingerprint"]
+        ):
+            return _min_stage(stage, constants.STAGE_STORED)
+        if state.chunker_fingerprint != current["chunker_fingerprint"]:
+            return _min_stage(stage, constants.STAGE_PARSED)
+        if (
+            state.embedding_fingerprint != current["embedding_fingerprint"]
+            or state.vector_schema_fingerprint != current["vector_schema_fingerprint"]
+        ):
+            return _min_stage(stage, constants.STAGE_CHUNKED)
+        return stage
+
+    def _verified_stage(self, stage: str, document_id: str, expected_sha256: str) -> str:
+        """在分阶段指纹之上，再核对实际产物集合，得到可信的最早重建阶段。
+
+        只有「指纹一致」并且「切片集合与向量集合都对账一致」时，才能沿用检查点；
+        否则把阶段下调到对应的重建起点，让本次执行真正收敛，而不是报成功。
+        """
         with session_scope(self.session_factory) as session:
             state = session.scalar(
                 select(DocumentPipelineState).where(DocumentPipelineState.doc_id == document_id)
             )
-            if state is None or state.file_sha256 != manifest_document.sha256:
-                return False
-            for key, value in stage_fingerprints(self.settings).items():
-                if getattr(state, key) != value:
-                    return False
-            return _stage_rank(state.last_completed_stage) >= _stage_rank(target_stage)
+            if state is None or state.file_sha256 != expected_sha256:
+                return constants.STAGE_NONE
+            expected_chunk_count = state.expected_chunk_count
+            expected_ids = list(
+                session.scalars(
+                    select(DocumentChunk.id).where(DocumentChunk.doc_id == document_id)
+                )
+            )
+
+        if not expected_ids or len(expected_ids) != expected_chunk_count:
+            return _min_stage(stage, constants.STAGE_PARSED)
+        if _stage_rank(stage) < _stage_rank(constants.STAGE_CHUNKED):
+            return stage
+
+        current = stage_fingerprints(self.settings)
+        existing = self.vectors.vectors_for_document(document_id)
+        if set(existing) != set(expected_ids):
+            return _min_stage(stage, constants.STAGE_CHUNKED)
+        for metadata in existing.values():
+            if metadata.get("embedding_fingerprint") != current["embedding_fingerprint"]:
+                return _min_stage(stage, constants.STAGE_CHUNKED)
+            if metadata.get("vector_schema_fingerprint") != current["vector_schema_fingerprint"]:
+                return _min_stage(stage, constants.STAGE_CHUNKED)
+            if metadata.get("chunker_version") != CHUNKER_VERSION:
+                return _min_stage(stage, constants.STAGE_CHUNKED)
+        return stage
 
     def _ensure_demo_document(self, session: Session, manifest_document: ManifestDocument) -> Document:
         """按 (source_type=demo, source_key) 取得或创建文档行。"""
@@ -477,6 +568,8 @@ class Worker:
         generation: int,
         checksum_error_code: str,
         previous_stage: str,
+        start_stage: str,
+        title: str | None,
         log_id: str,
     ) -> DocumentOutcome:
         attempts = 0
@@ -495,10 +588,13 @@ class Worker:
                     owner=owner,
                     generation=generation,
                     checksum_error_code=checksum_error_code,
+                    start_stage=start_stage,
+                    title=title,
+                    log_id=log_id,
                 )
             except ApiError as error:
                 last_error = error
-            except Exception:  # noqa: BLE001 - 非预期错误按可重试解析失败处理
+            except Exception:  # noqa: BLE001 - 非预期错误按可重试处理
                 logger.exception("document_attempt_crashed log_id=%s doc_id=%s", log_id, document_id)
                 last_error = ApiError(DOCUMENT_PARSE_FAILED)
 
@@ -525,7 +621,7 @@ class Worker:
                     else constants.RESULT_IMPORTED
                 ),
                 status=constants.JOB_DOC_COMPLETED,
-                last_completed_stage=constants.STAGE_PARSED,
+                last_completed_stage=constants.TARGET_STAGE,
                 doc_id=document_id,
                 pipeline_state_id=state_id,
                 attempts=attempts,
@@ -555,8 +651,12 @@ class Worker:
         owner: str,
         generation: int,
         checksum_error_code: str,
+        start_stage: str,
+        title: str | None,
+        log_id: str,
     ) -> None:
         path = Path(file_path)
+        rank = _stage_rank(start_stage)
 
         self._set_document_status(
             document_id, owner, generation, constants.STATUS_VALIDATING, constants.JOB_STAGE_VALIDATING
@@ -565,35 +665,49 @@ class Worker:
             raise ApiError(DOCUMENT_CORRUPT, retryable=True)
         if sha256_file(path) != expected_sha256:
             raise ApiError(checksum_error_code, retryable=False)
-        self._checkpoint(
-            document_id,
-            owner,
-            generation,
-            constants.STAGE_VALIDATED,
-            next_status=constants.STATUS_STORING,
-            next_current=constants.JOB_STAGE_STORING,
-        )
 
-        self._set_document_status(
-            document_id, owner, generation, constants.STATUS_STORING, constants.JOB_STAGE_STORING
-        )
-        self._guarded_document_update(
-            document_id, owner, generation, {"storage_path": str(path)}
-        )
-        self._checkpoint(
-            document_id,
-            owner,
-            generation,
-            constants.STAGE_STORED,
-            next_status=constants.STATUS_PARSING,
-            next_current=constants.JOB_STAGE_PARSING,
-        )
+        if rank < _stage_rank(constants.STAGE_PARSED):
+            # 需要（重新）解析：完整走 validated → stored → parsed，绝不提前下调检查点
+            self._checkpoint(
+                document_id,
+                owner,
+                generation,
+                constants.STAGE_VALIDATED,
+                next_status=constants.STATUS_STORING,
+                next_current=constants.JOB_STAGE_STORING,
+            )
+            self._set_document_status(
+                document_id, owner, generation, constants.STATUS_STORING, constants.JOB_STAGE_STORING
+            )
+            self._guarded_document_update(document_id, owner, generation, {"storage_path": str(path)})
+            self._checkpoint(
+                document_id,
+                owner,
+                generation,
+                constants.STAGE_STORED,
+                next_status=constants.STATUS_PARSING,
+                next_current=constants.JOB_STAGE_PARSING,
+            )
+            self._set_document_status(
+                document_id, owner, generation, constants.STATUS_PARSING, constants.JOB_STAGE_PARSING
+            )
+            blocks = self._executor.submit(parse_document, path, file_type).result()
+            self._persist_blocks(document_id, owner, generation, blocks)
+        else:
+            # 复用既有块：只确保 storage_path 指向当前文件，不回调检查点
+            self._guarded_document_update(document_id, owner, generation, {"storage_path": str(path)})
 
-        self._set_document_status(
-            document_id, owner, generation, constants.STATUS_PARSING, constants.JOB_STAGE_PARSING
-        )
-        blocks = self._executor.submit(parse_document, path, file_type).result()
-        self._persist_blocks(document_id, owner, generation, blocks)
+        if rank < _stage_rank(constants.STAGE_CHUNKED):
+            self._set_document_status(
+                document_id, owner, generation, constants.STATUS_CHUNKING, constants.JOB_STAGE_CHUNKING
+            )
+            self._persist_chunks(document_id, owner, generation, title)
+
+        if rank < _stage_rank(constants.STAGE_VECTOR_INDEXED):
+            self._set_document_status(
+                document_id, owner, generation, constants.STATUS_EMBEDDING, constants.JOB_STAGE_EMBEDDING
+            )
+            self._index_vectors(document_id, owner, generation, log_id)
 
     def _set_document_status(
         self, document_id: str, owner: str, generation: int, status: str, current_stage: str
@@ -638,8 +752,13 @@ class Worker:
         )
 
     def _persist_blocks(self, document_id: str, owner: str, generation: int, blocks) -> None:
-        """单个事务内先持久化块，再提交 parsed 检查点；重试不产生重复块。"""
+        """单个事务内先持久化块，再提交 parsed 检查点；重试不产生重复块。
+
+        块变化意味着切片与向量都失效，因此同一事务内一并清理旧 chunk。
+        """
+        current = stage_fingerprints(self.settings)
         with session_scope(self.session_factory) as session:
+            session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document_id))
             session.execute(delete(DocumentBlock).where(DocumentBlock.doc_id == document_id))
             session.add_all(
                 [
@@ -663,30 +782,211 @@ class Worker:
                 .where(DocumentPipelineState.doc_id == document_id)
                 .values(
                     last_completed_stage=constants.STAGE_PARSED,
+                    # 指纹只描述“本次实际产出该产物所用的组件版本”
+                    parser_fingerprint=current["parser_fingerprint"],
+                    normalization_fingerprint=current["normalization_fingerprint"],
+                    expected_chunk_count=0,
+                    vector_record_count=0,
                     failed_stage=None,
                     error_code=None,
                     error_message=None,
                     updated_at=utcnow(),
                 )
             )
-            session.execute(
-                update(Document)
-                .where(
-                    Document.id == document_id,
-                    Document.lease_owner == owner,
-                    Document.lease_generation == generation,
+        self._guarded_document_update(
+            document_id, owner, generation, {"status": constants.STATUS_CHUNKING, "current_stage": constants.JOB_STAGE_CHUNKING}
+        )
+
+    def _persist_chunks(
+        self, document_id: str, owner: str, generation: int, title: str | None
+    ) -> None:
+        """单个事务内先持久化完整 chunk 集合与预期数量，再提交 chunked 检查点。"""
+        chunker_fingerprint = stage_fingerprints(self.settings)["chunker_fingerprint"]
+
+        with session_scope(self.session_factory) as session:
+            document = session.get(Document, document_id)
+            if document is None:  # pragma: no cover - 文档已被删除
+                raise ApiError(DOCUMENT_PARSE_FAILED, retryable=False)
+            blocks = list(
+                session.scalars(
+                    select(DocumentBlock)
+                    .where(DocumentBlock.doc_id == document_id)
+                    .order_by(DocumentBlock.block_index)
                 )
+            )
+            source = [
+                ChunkSourceBlock(
+                    block_index=block.block_index,
+                    text=block.text,
+                    block_type=block.block_type,
+                    page_number=block.page_number,
+                    sheet_name=block.sheet_name,
+                    row_start=block.row_start,
+                    row_end=block.row_end,
+                    section_title=block.section_title,
+                )
+                for block in blocks
+            ]
+            drafts = self._executor.submit(
+                chunk_blocks,
+                source,
+                target_chars=self.settings.chunk_target_chars,
+                overlap_chars=self.settings.chunk_overlap_chars,
+            ).result()
+            records = build_chunk_records(
+                document,
+                drafts,
+                parser_version=PARSER_VERSION,
+                chunker_version=CHUNKER_VERSION,
+                chunker_fingerprint=chunker_fingerprint,
+                title=title,
+            )
+
+            session.execute(delete(DocumentChunk).where(DocumentChunk.doc_id == document_id))
+            session.add_all([DocumentChunk(**record) for record in records])
+            session.execute(
+                update(DocumentPipelineState)
+                .where(DocumentPipelineState.doc_id == document_id)
                 .values(
-                    status=constants.STATUS_QUEUED,
-                    current_stage=None,
-                    retrievable=False,
-                    attempt_count=0,
+                    last_completed_stage=constants.STAGE_CHUNKED,
+                    chunker_fingerprint=chunker_fingerprint,
+                    expected_chunk_count=len(records),
+                    vector_record_count=0,
+                    failed_stage=None,
                     error_code=None,
                     error_message=None,
-                    error_retryable=None,
                     updated_at=utcnow(),
                 )
             )
+        self._guarded_document_update(
+            document_id,
+            owner,
+            generation,
+            {"status": constants.STATUS_EMBEDDING, "current_stage": constants.JOB_STAGE_EMBEDDING},
+        )
+
+    def _index_vectors(self, document_id: str, owner: str, generation: int, log_id: str) -> None:
+        """生成缺失向量、清理多余向量并对账，然后提交 vector_indexed 检查点。
+
+        若上次在「Chroma upsert 之后、SQLite 检查点之前」崩溃，
+        本方法会复用 ``embedding_fingerprint`` 正确的既有向量，不再调用 Embedding。
+        """
+        embedding_descriptor = self.descriptor
+        pipeline_fp = pipeline_fingerprint(self.settings)
+        current = stage_fingerprints(self.settings)
+        current_embedding = current["embedding_fingerprint"]
+
+        with session_scope(self.session_factory) as session:
+            document = session.get(Document, document_id)
+            if document is None:  # pragma: no cover
+                raise ApiError(DOCUMENT_PARSE_FAILED, retryable=False)
+            chunks = list(
+                session.scalars(
+                    select(DocumentChunk)
+                    .where(DocumentChunk.doc_id == document_id)
+                    .order_by(DocumentChunk.chunk_index)
+                )
+            )
+            if not chunks:
+                raise ApiError(DOCUMENT_INDEX_FAILED, retryable=False)
+            metadata_by_id = {
+                chunk.id: chunk_vector_metadata(
+                    document,
+                    chunk,
+                    embedding_descriptor,
+                    pipeline_fingerprint_value=pipeline_fp,
+                    vector_schema_fingerprint=current["vector_schema_fingerprint"],
+                )
+                for chunk in chunks
+            }
+            text_by_id = {chunk.id: chunk.text for chunk in chunks}
+            expected_ids = [chunk.id for chunk in chunks]
+
+        expected = set(expected_ids)
+        existing = self.vectors.vectors_for_document(document_id)
+
+        stale = [chunk_id for chunk_id in existing if chunk_id not in expected]
+        if stale:
+            self.vectors.delete_ids(stale)
+
+        reusable = {
+            chunk_id
+            for chunk_id, metadata in existing.items()
+            if chunk_id in expected
+            and metadata.get("embedding_fingerprint") == current_embedding
+            and metadata.get("vector_schema_fingerprint") == current["vector_schema_fingerprint"]
+            and metadata.get("chunker_version") == CHUNKER_VERSION
+        }
+        pending = [chunk_id for chunk_id in expected_ids if chunk_id not in reusable]
+
+        reused = len(expected_ids) - len(pending)
+        if reused:
+            logger.info(
+                "vector_reused log_id=%s doc_id=%s reused=%s",
+                log_id,
+                document_id,
+                reused,
+            )
+
+        for batch in _batched(pending, self.settings.embedding_batch_size):
+            texts = [text_by_id[chunk_id] for chunk_id in batch]
+            vectors = self._executor.submit(self.embeddings.embed_documents, texts).result()
+            records = [
+                VectorRecord(
+                    chunk_id=chunk_id,
+                    text=text_by_id[chunk_id],
+                    metadata=metadata_by_id[chunk_id],
+                )
+                for chunk_id in batch
+            ]
+            self.vectors.upsert(records, vectors)
+
+        reconciled = self.vectors.vectors_for_document(document_id)
+        if set(reconciled) != expected:
+            raise ApiError(DOCUMENT_INDEX_FAILED, retryable=True)
+        for metadata in reconciled.values():
+            if metadata.get("embedding_fingerprint") != current_embedding:
+                raise ApiError(DOCUMENT_INDEX_FAILED, retryable=True)
+            if metadata.get("vector_schema_fingerprint") != current["vector_schema_fingerprint"]:
+                raise ApiError(DOCUMENT_INDEX_FAILED, retryable=True)
+
+        with session_scope(self.session_factory) as session:
+            session.execute(
+                update(DocumentPipelineState)
+                .where(DocumentPipelineState.doc_id == document_id)
+                .values(
+                    last_completed_stage=constants.STAGE_VECTOR_INDEXED,
+                    embedding_fingerprint=current_embedding,
+                    vector_schema_fingerprint=current["vector_schema_fingerprint"],
+                    vector_record_count=len(reconciled),
+                    failed_stage=None,
+                    error_code=None,
+                    error_message=None,
+                    updated_at=utcnow(),
+                )
+            )
+        self._guarded_document_update(
+            document_id,
+            owner,
+            generation,
+            {
+                "status": next_status_for_stage(constants.STAGE_VECTOR_INDEXED),
+                "current_stage": None,
+                "retrievable": False,
+                "attempt_count": 0,
+                "error_code": None,
+                "error_message": None,
+                "error_retryable": None,
+            },
+        )
+        logger.info(
+            "vector_indexed log_id=%s doc_id=%s chunks=%s reused=%s embedded=%s",
+            log_id,
+            document_id,
+            len(reconciled),
+            reused,
+            len(pending),
+        )
 
     def _record_document_failure(
         self,
@@ -811,7 +1111,9 @@ class Worker:
             file_type = refreshed.file_type
             state_id = state.id
             previous_stage = state.last_completed_stage
+            effective_stage = self._effective_stage(state, previous_stage)
 
+        effective_stage = self._verified_stage(effective_stage, document_id, expected_sha256)
         outcome = self._execute_with_retries(
             document_id=document_id,
             state_id=state_id,
@@ -822,6 +1124,8 @@ class Worker:
             generation=generation,
             checksum_error_code=DOCUMENT_CORRUPT,
             previous_stage=previous_stage,
+            start_stage=effective_stage,
+            title=None,
             log_id="-",
         )
         logger.info(
@@ -832,6 +1136,13 @@ class Worker:
             outcome.error_code or "-",
         )
         return True
+
+
+def _build_provider(settings: Settings):
+    """延迟到运行期导入工厂，避免模块级循环依赖。"""
+    from app.embedding.factory import build_embedding_provider
+
+    return build_embedding_provider(settings)
 
 
 __all__ = ["DocumentOutcome", "Worker", "requeue_expired_jobs", "requeue_interrupted_uploads"]

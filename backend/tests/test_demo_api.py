@@ -170,7 +170,7 @@ def test_seed_returns_202_immediately_with_location(client: TestClient) -> None:
     assert response.status_code == 202
     payload = response.json()
     assert payload["status"] == constants.JOB_QUEUED
-    assert payload["target_stage"] == constants.STAGE_PARSED
+    assert payload["target_stage"] == constants.TARGET_STAGE
     assert payload["reused_active_job"] is False
     assert payload["status_url"] == f"/api/demo/jobs/{payload['job_id']}"
     assert response.headers["Location"] == payload["status_url"]
@@ -251,7 +251,7 @@ def test_first_job_imports_all_fifteen_documents(client: TestClient, worker, con
     assert payload["finished_at"]
     assert len(payload["documents"]) == 15
     assert {item["result"] for item in payload["documents"]} == {constants.RESULT_IMPORTED}
-    assert {item["last_completed_stage"] for item in payload["documents"]} == {constants.STAGE_PARSED}
+    assert {item["last_completed_stage"] for item in payload["documents"]} == {constants.TARGET_STAGE}
     assert payload["errors"] == []
 
     with context.session_factory() as session:
@@ -259,7 +259,7 @@ def test_first_job_imports_all_fifteen_documents(client: TestClient, worker, con
             state.last_completed_stage
             for state in session.scalars(select(DocumentPipelineState))
         }
-    assert statuses == {constants.STAGE_PARSED}
+    assert statuses == {constants.TARGET_STAGE}
 
 
 def test_second_job_is_pure_skip(client: TestClient, worker, context) -> None:

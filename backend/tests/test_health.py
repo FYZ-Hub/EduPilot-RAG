@@ -25,7 +25,7 @@ def test_health_reports_degraded_without_business_features(client: TestClient) -
 def test_health_reports_provider_devices_and_not_ready(client: TestClient) -> None:
     providers = client.get("/api/health").json()["providers"]
 
-    assert providers["embedding"] == {"provider": "local", "device": "cpu", "ready": False}
+    assert providers["embedding"] == {"provider": "fake", "device": "cpu", "ready": False}
     assert providers["reranker"] == {"provider": "local", "device": "cpu", "ready": False}
     assert providers["llm"]["device"] is None
     assert providers["llm"]["ready"] is False

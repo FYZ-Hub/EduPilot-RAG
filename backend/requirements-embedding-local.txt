@@ -1,0 +1,17 @@
+# 阶段 3 可选依赖：本地 BGE-M3 Embedding Provider 的运行时环境
+#
+# 默认 backend 镜像**不安装**本文件：torch 体积为数 GB，而阶段 3 的验收要求
+# “不得实际下载模型权重”，全部自动化测试使用 FakeEmbeddingProvider。
+# 只有在明确需要本地模型推理（并已把权重放入 MODEL_CACHE_PATH）时才安装：
+#
+#   pip install --no-cache-dir -r requirements-embedding-local.txt
+#
+# 许可证：
+# - torch（PyTorch）：BSD-3-Clause
+# - sentence-transformers：Apache-2.0
+# - transformers：Apache-2.0
+# - huggingface-hub：Apache-2.0
+torch==2.5.1
+sentence-transformers==3.3.1
+transformers==4.46.3
+huggingface-hub==0.26.2

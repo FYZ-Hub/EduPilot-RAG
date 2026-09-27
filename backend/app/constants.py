@@ -89,8 +89,17 @@ STAGES = (
     STAGE_COMPLETED,
 )
 
-# 阶段 2B 只推进到 parsed；后续阶段会依次上调该常量
-TARGET_STAGE = STAGE_PARSED
+# 阶段 2B 只推进到 parsed；阶段 3 上调为 vector_indexed（阶段 4 再上调为 completed）
+TARGET_STAGE = STAGE_VECTOR_INDEXED
+
+# Embedding Provider 种类（PRODUCT_SPEC 4.2 Provider 校验矩阵）
+EMBEDDING_PROVIDER_FAKE = "fake"
+EMBEDDING_PROVIDER_LOCAL = "local"
+EMBEDDING_PROVIDER_API = "api"
+EMBEDDING_PROVIDERS = (EMBEDDING_PROVIDER_FAKE, EMBEDDING_PROVIDER_LOCAL, EMBEDDING_PROVIDER_API)
+
+# Fake Provider 固定维度；本地 BGE-M3 也是 1024 维
+EMBEDDING_DIMENSION = 1024
 
 # 激活状态
 ACTIVATION_ACTIVE = "active"
