@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.embedding.base import EmbeddingProvider
+from app.llm.base import LLMProvider
 from app.rerank.base import RerankProvider
 from app.runtime.coordinator import LocalModelCoordinator
 from app.vector.store import ChromaVectorStore
@@ -30,6 +31,8 @@ class AppContext:
     # 本地 Embedding / 本地 Reranker 共用的进程级串行协调器
     coordinator: LocalModelCoordinator
     reranker: RerankProvider
+    # 阶段 6：LLM Provider（fake / openai_compatible），进程级复用
+    llm: LLMProvider
 
 
 def get_context(request: Request) -> AppContext:

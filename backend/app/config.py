@@ -13,6 +13,8 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Device = Literal["cpu", "cuda"]
 ProviderKind = Literal["local", "api", "fake"]
+# 阶段 6 明确不提供本地 LLM：只允许 fake 与 OpenAI 兼容 API
+LlmProviderKind = Literal["fake", "openai_compatible"]
 
 
 class Settings(BaseSettings):
@@ -70,12 +72,16 @@ class Settings(BaseSettings):
     # 本地 Provider 默认只读缓存，不隐式下载权重（权重需预先放入 MODEL_CACHE_PATH）
     rerank_local_files_only: bool = True
 
-    # LLM（缺省未配置，不阻止服务启动）
-    llm_provider: str = "openai_compatible"
+    # LLM（阶段 6 起使用；缺省未配置，不阻止服务启动；不支持本地 LLM）
+    llm_provider: LlmProviderKind = "openai_compatible"
     llm_base_url: str = ""
     llm_api_key: str = ""
     llm_model: str = ""
     llm_timeout_seconds: int = 60
+    # 受证据约束生成的输出上限（字符）；超长回答一律判为非法结构
+    llm_answer_max_chars: int = 2000
+    # 多轮问题改写输出的长度上限（字符）
+    llm_rewrite_max_chars: int = 300
 
     # 检索与切片参数（阶段 2 起使用）
     chunk_target_chars: int = 550

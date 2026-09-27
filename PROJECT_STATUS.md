@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 5 已完成（Reranker）**
-- 下一阶段：**阶段 6 — SSE 问答与引用**
+- 当前阶段：**阶段 6 已完成（SSE 问答与引用）**
+- 下一阶段：**阶段 7 — 确定性学分规则引擎**
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -16,11 +16,66 @@
 | 3 | 语义切片与 Chroma | completed |
 | 4 | FTS5 与混合检索 | completed |
 | 5 | Reranker | completed |
-| 6 | SSE 问答与引用 | not_started |
+| 6 | SSE 问答与引用 | completed |
 | 7 | 确定性学分规则引擎 | not_started |
 | 8 | Vue 核心页面 | not_started |
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 6 结论（SSE 问答与引用）
+
+阶段 6 为 `completed`；阶段 7 仍为 `not_started`。本轮**只实现后端问答能力**，未实现 Chat 前端页面、SSE 前端解析、学分规则引擎与 RAG 评测。
+
+### API 与 SSE 契约
+
+- 新增 `POST /api/chat/stream`（`text/event-stream`），请求体仅含 `messages`（1–10 条）与 `filters`（`major` / `grade_year` / `semester` / `doc_category`）。
+- 严格校验：role 只允许 `user` / `assistant`；最后一条必须是非空 user；单条 ≤ 4000 字符、总计 ≤ 12000 字符；`messages` / `message` / `filters` 一律 `extra="forbid"`。校验失败在**开流前**返回统一 JSON 422（`{code,message,details,request_id}`），`details` 只含字段位置与错误类型，**不回显用户原文**。
+- SSE 只允许四种事件：`token` / `citation` / `done` / `error`。标准帧 `event: <name>\ndata: <单行JSON>\n\n`，UTF-8，`Cache-Control: no-cache`、`X-Accel-Buffering: no`。
+- `citation` 字段严格为 PRODUCT_SPEC 6.3 的 13 个字段（`citation_index` 从 1 连续、流内唯一），**不含**分数、路径或内部诊断；`citation_count` 等于实际 citation 事件数；每条流恰好一个 `done` 或 `error`，之后立即结束；拒答与冲突用 `done` 而**不是** `error`。
+- `request_id` 在创建 StreamingResponse **之前**从 `request.state` 读取并显式传入流生成器（中间件会在 `call_next` 返回后重置 ContextVar），`X-Request-ID` 响应头与 `done`/`error.request_id` 完全一致。
+- 开流前的已知错误（schema、Provider 未配置、生产环境 Fake）走统一 JSON 4xx/5xx；响应头发出后由流生成器自行收敛为唯一 SSE `error`，绝不泄漏 traceback、异常文本、请求正文或配置值。稳定错误码：`LLM_PROVIDER_UNAVAILABLE`、`LLM_PROVIDER_FORBIDDEN`、`MODEL_TIMEOUT`、`MODEL_RESPONSE_INVALID`、`MODEL_STREAM_INTERRUPTED`、`CHAT_QUERY_REWRITE_FAILED`。
+
+### LLM Provider 与健康语义
+
+- 新增 `app/llm/`：`base`（`LLMDescriptor` / `LLMProvider`）、`fake`、`api`（OpenAI 兼容，使用现有 httpx，**不引入 OpenAI SDK**）、`factory`、`prompts`。**不提供本地 LLM**。
+- Fake：完全确定性（SHA-256/纯文本派生，不使用 `hash()`），跨进程与任意 `PYTHONHASHSEED` 一致，零网络、零模型、不读 `ground_truth`、不针对演示问题硬编码；`production` 由工厂拒绝。
+- API：`POST {LLM_BASE_URL}/chat/completions` + Bearer + 显式 timeout + 有界响应体；Base URL / model / API Key 缺一即安全失败；构造与健康检查不联网；所有测试使用 `httpx.AsyncClient` 替身。
+- `loaded` 为**证据式**语义：API Provider 首次成功且响应结构校验通过后才为 true，失败或 `close` 后恢复 false；Fake 可直接为 true。
+- `capabilities.chat` 与 `providers.llm.loaded` **严格分离**：`chat` 表示前端能否发起请求（未配置 → `unconfigured`；无当前可检索文档 → `unavailable`；否则 `ready`），**不绑定** `loaded`，避免「chat != ready 就禁止建立 SSE，而没有第一次 SSE 就永远无法 ready」的死锁。可检索文档统计复用检索侧 `RetrievalScope` + eligibility 口径，candidate / inactive / 旧 pipeline 指纹文档都不计入。
+
+### 问题改写、拒答、冲突与引用映射
+
+- 单轮直接使用最后一条 user 消息；**多轮才**调用 LLM 改写为独立查询，历史只用于改写、**不作为事实证据**；改写结果必须非空且 ≤ `LLM_REWRITE_MAX_CHARS`，失败返回稳定错误（不静默使用可能改变语义的查询）；`filters` 直接映射为 `RetrievalFilters`，模型无法增删过滤条件。
+- 检索固定走 `RerankingRetriever`，候选 ≤ 20、输出 ≤ 6；证据不足 6 条时只使用实际数量。
+- 同步检索（Embedding / SQLite / Chroma / FTS / Reranker）统一放入线程池，线程内**自建短 Session 并立即关闭**，只把脱离 Session 的 `RerankedResult` 交给生成阶段；请求处理过程**不持有任何 Session**，也不使用 `Depends(get_session)`。
+- 拒答：零结果 → `no_evidence`；显式 `RETRIEVAL_SCORE_THRESHOLD` 下优先比较 `rerank_score`，reranker 降级（`rerank_score` 缺失）时返回 `score_unavailable`，**绝不用 `fused_score` 顶替比较**；阈值默认为空，不自造默认值。以上三条路径**都不调用生成 LLM**，`citation_count=0`。
+- 规划类问题（阶段 7 未实现）由通用意图守卫拒绝，`reason_code=planning_unavailable`，不让模型心算学分或生成规划数字。
+- 冲突：`app/chat/conflict.py` 只依据**证据文本与文档版本**做确定性检测（跨版本同字段取值不一致；同一文档内重复槽位但内容不同），**不读取** `demo/ground_truth.jsonl`、`manifest.intentional_conflicts` 或演示问题 ID。命中后服务端强制 `outcome=conflict`、`reason_code=version_conflict`，并要求引用覆盖冲突双方（跨版本），citation 中并列 `document_version` / `effective_from`，**不得替用户选择版本**。
+- 引用安全：模型只能引用服务端编号；`chunk_id` / `doc_id` / `file_name` / `page_number` / `sheet_name` / 行范围 / `section_title` / `quote` 一律由服务端从原始 `RerankedResult` 构造。`GroundedCompletion` 在**发送任何 token 之前**完整校验（outcome 合法、reason_code 白名单、answer 非空且有长度上限、编号为整数且唯一且在范围内、正文 `[n]` 与结构化引用一致），任何未知/越界/重复/缺失/不一致都返回 `MODEL_RESPONSE_INVALID`；非连续编号安全重映射为从 1 开始的连续 `citation_index` 并同步重写正文标记；`citation.quote` 使用**原始** `chunk.text`。
+
+### Privacy v4 外发边界
+
+- 所有发往外部 LLM 的文本（当前问题、历史、证据片段、冲突版本行）都在 Provider 边界调用共享的 `app/core/privacy.py`，当前策略 `external-privacy-v4`。
+- 只发送回答所需的最少证据；**不发送**绝对路径、`storage_path`、`chunk_id`、`doc_id`、locator、文件系统路径、检索分数、API 配置或不必要的文件名与内部诊断（`doc_id` 仅用于服务端冲突检测，不进提示词）。
+- 只清洗外发副本：原 `messages` / query / `RetrievedChunk` / SQLite / Chroma / FTS / `citation.quote` / locator 零改动。
+- LLM descriptor 记录 `privacy_policy_version` / `prompt_version` / `response_schema_version` 并生成稳定 fingerprint，但**不进入** `pipeline_fingerprint`，也不触发任何索引重建。
+
+### 取消与资源释放
+
+- 使用异步 StreamingResponse 与异步 HTTP；客户端断开或 `asyncio.CancelledError` 时停止读取上游、不再发送任何事件（含 `done`/`error`）、继续向上传播取消。
+- `finally` 中取消在途任务并标记资源释放；上游 response / `AsyncClient` 由 `async with` 保证关闭；进程级 Provider 由 lifespan 幂等 `aclose`。测试**直接驱动异步生成器**并断言 finally 执行、取消后零事件。
+- 线程池中已开始的同步检索不虚假声称被杀死；断开后不再生成或发送任何 SSE。
+
+### 测试与默认环境状态
+
+- 新增 `tests/test_llm_provider.py`、`test_chat_contract.py`、`test_chat_flow.py`、`test_chat_resilience.py`、`test_chat_health.py`；覆盖请求边界、原始 SSE framing、引用压力、拒答、冲突、多轮改写、提示注入、Privacy v4 外发、上游错误、取消与资源释放、Fake 确定性与健康语义。
+- 全量 `docker compose exec backend pytest` → **445 passed**；生成器镜像 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、日志泄漏扫描全部通过。
+- 默认 backend 镜像仍**没有** torch / sentence-transformers / 本地 LLM / 模型权重 / Hugging Face 缓存；`./data/models` 仍为空；**未下载或运行任何真实模型，未调用真实外部 API**。
+- 默认 Local 环境仍为 `degraded`：`embedding.ready=false`、`reranker.ready=false`、`llm=unconfigured`、`planning=unavailable`。
+
+### 未实现范围
+
+- 阶段 7 学分规则引擎、阶段 8 Vue Chat 页面与前端 SSE 解析、阶段 9 RAG 评测、问题改写之外的任何 LLM 能力（答案生成以外的引用流/多轮记忆持久化）；服务端**不保存**聊天历史，也没有新增数据库表。
 
 ## 阶段 0 结论
 

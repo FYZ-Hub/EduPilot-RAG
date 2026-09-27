@@ -5,6 +5,7 @@
 
 from __future__ import annotations
 
+import json
 import shutil
 from pathlib import Path
 from types import SimpleNamespace
@@ -16,6 +17,7 @@ from app.config import Settings
 from app.db import create_db_engine, create_session_factory, init_database
 from app.embedding.base import descriptor_for
 from app.embedding.factory import build_embedding_provider
+from app.llm.factory import build_llm_provider
 from app.main import create_app
 from app.rerank.factory import build_rerank_provider
 from app.vector.store import ChromaVectorStore
@@ -43,6 +45,7 @@ def build_settings(tmp_path: Path, **overrides) -> Settings:
         "demo_dataset_version": "2026.1",
         "embedding_provider": "fake",
         "rerank_provider": "fake",
+        "llm_provider": "fake",
         "worker_enabled": False,
         "worker_poll_seconds": 0.05,
         "demo_job_poll_seconds": 1,
@@ -105,6 +108,67 @@ def vectors(settings):
     store = ChromaVectorStore(settings, descriptor_for(settings))
     yield store
     store.close()
+
+
+@pytest.fixture
+def llm(settings):
+    """Fake LLM Provider：确定性、离线。"""
+    provider = build_llm_provider(settings)
+    yield provider
+    provider.close()
+
+
+@pytest.fixture
+def chat_runtime(context, worker, reranker, llm):
+    """ChatStreamRunner 所需的进程级资源集合（不含任何 Session）。"""
+    from app.chat.service import ChatRuntime
+
+    return ChatRuntime(
+        settings=context.settings,
+        session_factory=context.session_factory,
+        vectors=worker.vectors,
+        embeddings=worker.embeddings,
+        reranker=reranker,
+        coordinator=worker.coordinator,
+        llm=llm,
+    )
+
+
+@pytest.fixture
+def evidence(search, ingest_demo):
+    """真实演示语料的检索结果（已脱离 Session，可安全传给生成阶段）。
+
+    供阶段 6 的 Chat 测试复用：先用真实语料拿到 ``RerankedResult``，
+    再按需替换 ``ChatStreamRunner._retrieve`` 以精确控制证据。
+    """
+    ingest_demo()
+
+    def _get(query: str, top_k: int = 6):
+        results, _diagnostics = search.rerank(query, top_k=top_k)
+        return results
+
+    return _get
+
+
+def parse_sse(body: bytes) -> list[tuple[str, dict]]:
+    """把 SSE 原始字节解析为 ``[(event, payload), ...]``，并校验单行 JSON 帧格式。"""
+    events: list[tuple[str, dict]] = []
+    text = body.decode("utf-8")
+    for block in text.split("\n\n"):
+        if not block.strip():
+            continue
+        name = None
+        data = None
+        for line in block.split("\n"):
+            if line.startswith("event: "):
+                name = line[len("event: ") :]
+            elif line.startswith("data: "):
+                data = line[len("data: ") :]
+        assert name is not None, f"帧缺少 event 行: {block!r}"
+        assert data is not None, f"帧缺少 data 行: {block!r}"
+        assert "\n" not in data, "data 必须是单行 JSON"
+        events.append((name, json.loads(data)))
+    return events
 
 
 @pytest.fixture

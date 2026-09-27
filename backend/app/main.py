@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.chat import router as chat_router
 from app.api.demo import router as demo_router
 from app.api.deps import AppContext
 from app.api.documents import router as documents_router
@@ -30,6 +31,7 @@ from app.core.errors import (
 )
 from app.core.request_id import RequestContextMiddleware, error_response, get_request_id
 from app.db import create_db_engine, create_session_factory, init_database
+from app.llm.factory import build_llm_provider
 from app.rerank.factory import build_rerank_provider
 from app.runtime.coordinator import LocalModelCoordinator
 from app.worker.runner import Worker
@@ -87,8 +89,9 @@ async def _lifespan(application: FastAPI):
         yield
     finally:
         context.worker.stop()
-        # Reranker 与协调器在关闭时幂等释放，确保不残留本地模型
+        # Reranker / LLM 与协调器在关闭时幂等释放，确保不残留本地模型与上游连接
         context.reranker.close()
+        await context.llm.aclose()
         context.coordinator.close()
 
 
@@ -103,6 +106,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     # 进程级共享协调器：worker Embedding、Dense 查询 Embedding 与 Local Reranker 串行复用
     coordinator = LocalModelCoordinator()
     reranker = build_rerank_provider(resolved, coordinator)
+    # LLM Provider：构造阶段不联网、不加载模型；fake 在生产环境会被拒绝
+    llm = build_llm_provider(resolved)
 
     application = FastAPI(
         title=resolved.app_name,
@@ -121,6 +126,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         vectors=worker.vectors,
         coordinator=coordinator,
         reranker=reranker,
+        llm=llm,
     )
 
     # 先加请求上下文，再加 CORS，使 CORS 位于最外层（错误响应也带跨域头）
@@ -141,6 +147,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(documents_router, prefix="/api")
     application.include_router(demo_router, prefix="/api")
     application.include_router(retrieval_router, prefix="/api")
+    application.include_router(chat_router, prefix="/api")
     return application
 
 
