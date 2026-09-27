@@ -573,6 +573,102 @@ def test_missing_required_course_shape_matches_spec() -> None:
     assert item.evidence_chunk_ids == ()
 
 
+# --- BUG-7A-01：PlanningResult 固定字段契约 ---------------------------------
+
+# PRODUCT_SPEC 5.2 明确规定 ``PlanningResult`` 只能包含这 8 个字段
+PLANNING_RESULT_FIELDS = (
+    "required_credits",
+    "completed_credits",
+    "in_progress_credits",
+    "remaining_credits",
+    "missing_required_courses",
+    "category_gaps",
+    "conflict_warnings",
+    "evidence",
+)
+
+
+def test_planning_result_dataclass_has_exactly_the_spec_fields() -> None:
+    import dataclasses
+
+    from app.academic.types import PlanningResult as SpecResult
+
+    assert [field.name for field in dataclasses.fields(SpecResult)] == list(
+        PLANNING_RESULT_FIELDS
+    ), "PlanningResult 不得增删 PRODUCT_SPEC 5.2 规定的字段"
+
+
+def test_planning_result_payload_has_exactly_the_spec_keys() -> None:
+    payload = planning_result_payload(
+        compute_plan([_record("QM-CS101", "4.0", STATUS_PASSED)], _rule_set())
+    )
+    assert list(payload) == list(
+        PLANNING_RESULT_FIELDS
+    ), "顶层 key 必须与 PRODUCT_SPEC 5.2 完全一致（不允许仅从 payload 隐藏字段）"
+
+
+# --- BUG-7A-02：passed 与 in_progress 并存必须报冲突 --------------------------
+
+
+def test_passed_and_in_progress_on_same_course_reports_contradiction() -> None:
+    records = [
+        _record("QM-CS101", "4.0", STATUS_IN_PROGRESS),
+        _record("QM-CS101", "4.0", STATUS_PASSED),
+    ]
+    plan = compute_plan(records, _rule_set())
+
+    assert plan.completed_credits == Decimal("4.0")
+    assert plan.in_progress_credits == Decimal("0.0"), "passed 与 in_progress 互斥"
+    codes = [warning.code for warning in plan.conflict_warnings]
+    assert codes.count(WARN_RECORD_CONTRADICTION) == 1, "必须报出且只报出一次矛盾 warning"
+
+    swapped = compute_plan(list(reversed(records)), _rule_set())
+    assert [warning.code for warning in swapped.conflict_warnings] == codes
+    assert planning_result_payload(swapped) == planning_result_payload(plan)
+
+
+def test_failed_and_in_progress_on_same_course_reports_contradiction() -> None:
+    records = [
+        _record("QM-CS204", "3.5", STATUS_IN_PROGRESS),
+        _record("QM-CS204", "3.5", STATUS_FAILED),
+    ]
+    plan = compute_plan(records, _rule_set())
+    codes = [warning.code for warning in plan.conflict_warnings]
+    assert codes.count(WARN_RECORD_CONTRADICTION) == 1
+    assert plan.in_progress_credits == Decimal("3.5"), "在修仍然计入"
+
+
+@pytest.mark.parametrize(
+    "statuses",
+    [
+        (STATUS_FAILED, STATUS_PASSED),
+        (STATUS_FAILED, STATUS_IN_PROGRESS),
+        (STATUS_PASSED, STATUS_IN_PROGRESS),
+    ],
+)
+def test_every_conflicting_status_pair_reports_exactly_one_warning(statuses) -> None:
+    records = [_record("QM-CS101", "4.0", status) for status in statuses]
+    plan = compute_plan(records, _rule_set())
+    codes = [warning.code for warning in plan.conflict_warnings]
+    assert codes.count(WARN_RECORD_CONTRADICTION) == 1, f"{statuses} 必须报出矛盾 warning"
+
+
+def test_contradiction_warning_is_single_even_with_many_records() -> None:
+    records = [
+        _record("QM-CS101", "4.0", STATUS_FAILED),
+        _record("QM-CS101", "4.0", STATUS_IN_PROGRESS),
+        _record("QM-CS101", "4.0", STATUS_PASSED),
+        _record("QM-CS302", "4.0", STATUS_FAILED),
+        _record("QM-CS302", "4.0", STATUS_IN_PROGRESS),
+    ]
+    plan = compute_plan(records, _rule_set())
+    warnings = [item for item in plan.conflict_warnings if item.code == WARN_RECORD_CONTRADICTION]
+    assert len(warnings) == 1, "同一批矛盾只产生一个稳定 warning"
+    assert "QM-CS101" in warnings[0].message and "QM-CS302" in warnings[0].message
+    assert plan.completed_credits == Decimal("4.0")
+    assert plan.in_progress_credits == Decimal("4.0"), "QM-CS302 仅在修，仍计入在修学分"
+
+
 # --- 隔离性守卫 -------------------------------------------------------------
 
 

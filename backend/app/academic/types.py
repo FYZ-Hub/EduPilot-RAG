@@ -183,7 +183,11 @@ class PlanningEvidence:
 
 @dataclass(frozen=True)
 class PlanningResult:
-    """PRODUCT_SPEC 5.2 ``PlanningResult``（八项固定字段 + 版本追溯）。"""
+    """PRODUCT_SPEC 5.2 ``PlanningResult``。
+
+    字段集**严格固定为 8 项**，不得增删：所选培养方案的展示信息（专业 / 规则版本）
+    不属于本结构，应由外层响应元数据或 options 数据承担。
+    """
 
     required_credits: Decimal
     completed_credits: Decimal
@@ -193,9 +197,6 @@ class PlanningResult:
     category_gaps: tuple[CategoryGap, ...]
     conflict_warnings: tuple[ConflictWarning, ...]
     evidence: tuple[PlanningEvidence, ...]
-    # 追溯：用于审计与测试对照，不参与计算
-    major: str = ""
-    rule_version: str = ""
 
 
 def plan_evidence_payload(item: PlanningEvidence) -> dict[str, object]:
@@ -215,7 +216,9 @@ def plan_evidence_payload(item: PlanningEvidence) -> dict[str, object]:
 
 
 def planning_result_payload(result: PlanningResult) -> dict[str, object]:
-    """稳定序列化：数字一位小数、数组顺序固定；相同结果产生逐字节一致的 JSON。"""
+    """稳定序列化：顶层 key 严格等于 PRODUCT_SPEC 5.2 的 8 项，
+    数字一位小数、数组顺序固定；相同结果产生逐字节一致的 JSON。
+    """
     return {
         "required_credits": credit_number(result.required_credits),
         "completed_credits": credit_number(result.completed_credits),
@@ -251,8 +254,6 @@ def planning_result_payload(result: PlanningResult) -> dict[str, object]:
             for item in result.conflict_warnings
         ],
         "evidence": [plan_evidence_payload(item) for item in result.evidence],
-        "major": result.major,
-        "rule_version": result.rule_version,
     }
 
 

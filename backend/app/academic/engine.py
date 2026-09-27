@@ -110,12 +110,16 @@ def compute_plan(
         else:
             failed_codes.add(code)
 
+    # 冲突信号必须在删除之前采集：passed 与 in_progress 并存同样是矛盾记录
+    passed_and_in_progress = set(passed) & set(in_progress)
     # passed 优先：已修与在修互斥，重复通过 / 重复在修都只保留一次
     for code in list(in_progress):
         if code in passed:
             del in_progress[code]
 
-    contradictions = sorted(failed_codes & (set(passed) | set(in_progress)))
+    # 矛盾记录覆盖三种组合：failed+passed、failed+in_progress、passed+in_progress
+    contradictory = (failed_codes & (set(passed) | set(in_progress))) | passed_and_in_progress
+    contradictions = sorted(contradictory)
 
     # --- 学分与类别以所选规则为准 -----------------------------------------
     catalog = rule.course_by_code
@@ -278,8 +282,6 @@ def compute_plan(
         category_gaps=tuple(category_gaps),
         conflict_warnings=tuple(warnings),
         evidence=_dedupe_evidence(evidence),
-        major=rule.major,
-        rule_version=rule.rule_version,
     )
 
 

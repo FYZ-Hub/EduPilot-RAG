@@ -42,7 +42,7 @@
 - 内部全程 `Decimal`，对外统一量化到一位小数；拒绝 NaN / Infinity / 负学分 / 未知状态 / 空课程代码。
 - `passed` 计入 `completed_credits`；`in_progress` 计入 `in_progress_credits`；`failed` 不计分。
 - 同一 `course_code` 的正考 / 补考 / 重修**只计一次**；重复通过、重复在修同样只计一次。
-- `passed` 与 `in_progress` 互斥，`passed` 优先；两者并存时额外产生 `COURSE_RECORD_CONTRADICTION` warning。
+- `passed` 与 `in_progress` 互斥，`passed` 优先；`COURSE_RECORD_CONTRADICTION` 覆盖三种矛盾组合（`failed`+`passed`、`failed`+`in_progress`、`passed`+`in_progress`），同一批矛盾只产生**一个**稳定 warning 并按课程代码排序。
 - 学分与类别**优先取用户显式选择的 rule set 课程目录**，不混入其它版本；记录类别与规则不一致时按规则计分（不双重计分）并产生 `COURSE_CATEGORY_MISMATCH` warning。
 - `remaining_credits = max(required - completed - in_progress, 0)`；每个 `CategoryGap.remaining_credits` 同样钳制在 0，**任何路径都不产生负数**。
 - 必修课程：`passed` 或 `in_progress` 即视为已覆盖、不列入 missing；`failed` 仍列入；总学分缺口为 0 时仍保留未满足的 missing 列表。
@@ -53,7 +53,7 @@
 
 ### 数据结构（严格对齐 PRODUCT_SPEC 5.2）
 
-`CourseRecord`、`DegreeRule`、`PlanningResult`、`MissingRequiredCourse`、`CategoryGap`、`ConflictWarning`、`PlanningEvidence` 字段与文档逐一核对，**未增删字段**；`PlanningResult` 额外携带只读的 `major` / `rule_version` 用于审计与测试对照，不参与计算。
+`CourseRecord`、`DegreeRule`、`PlanningResult`、`MissingRequiredCourse`、`CategoryGap`、`ConflictWarning`、`PlanningEvidence` 字段与 `PRODUCT_SPEC.md` 5.2 逐一核对，**未增删任何字段**；`PlanningResult` 严格为 8 项，`planning_result_payload()` 顶层 key 亦严格为这 8 项（有回归测试断言字段名与 key 列表逐一相等）。所选培养方案的展示信息（专业 / 规则版本）**不属于** `PlanningResult`，后续由 options 数据或外层响应元数据承担。
 
 ### 投影职责边界（7A 只定义接口与纯函数）
 
@@ -69,6 +69,14 @@
 - 在**真实运行数据卷**上执行 `init_database` 验证：6 张新表已增量创建，`documents` / `document_chunks` / `demo_active_dataset` / `document_pipeline_state` 等既有表全部保留。
 - 提交内容扫描：8 个文件，无 `.env` / 数据库 / uploads / 日志 / 模型 / 缓存 / `__pycache__` / `dist`。
 - 未调用任何真实 API、未下载或加载模型、未启动 GPU Profile；默认镜像仍无 torch / sentence-transformers。
+
+### 阶段 7A 修复轮（契约与冲突 warning）
+
+阶段 7 仍为 `in_progress`；本轮只修复两个已复现的 7A 缺陷，**未开始 7B**（未实现导入、options API、plan API、health planning ready 与前端功能）。
+
+- **BUG-7A-01（`PlanningResult` 固定字段契约漂移）**：7A 首版在 `PlanningResult` 上额外加了 `major` / `rule_version`，并在 `planning_result_payload()` 中输出，违反 PRODUCT_SPEC 5.2「字段固定」。已恢复为**严格 8 字段**，payload 顶层 key 亦严格为这 8 项；未修改 `docs/PRODUCT_SPEC.md`。新增回归测试断言 `dataclasses.fields()` 与 payload key 列表逐一相等（**不允许只从 payload 隐藏字段**）。
+- **BUG-7A-02（`passed` 与 `in_progress` 并存漏报冲突）**：首版先删除被 `passed` 覆盖的 `in_progress`，再计算矛盾集合，导致该组合缺少 `COURSE_RECORD_CONTRADICTION`。已改为**在删除之前采集二者交集**，矛盾判定覆盖 `failed`+`passed`、`failed`+`in_progress`、`passed`+`in_progress` 三种组合；同一课程无论多少条矛盾记录只产生一个稳定 warning（按课程代码排序）；`passed` 优先、重复课程只计一次、Decimal 计算等既有行为未变。
+- 修复前证据：新回归测试 **4 failed / 退出码 1**（字段契约 2 项 + 冲突 warning 2 项）；修复后 7A 定向测试与全量 `pytest` 全部通过，退出码 0。
 
 ## 阶段 6 结论（SSE 问答与引用）
 
