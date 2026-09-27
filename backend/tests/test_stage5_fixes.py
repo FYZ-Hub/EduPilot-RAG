@@ -593,12 +593,6 @@ def test_privacy_scrub_does_not_over_redact_academic_terms() -> None:
     assert scrub(ACADEMIC_SAFE_TEXT) == ACADEMIC_SAFE_TEXT
 
 
-def test_privacy_policy_version_is_v2() -> None:
-    from app.core.privacy import PRIVACY_POLICY_VERSION
-
-    assert PRIVACY_POLICY_VERSION == "external-privacy-v2"
-
-
 def test_privacy_v2_bumps_only_api_embedding_fingerprint(tmp_path) -> None:
     from app.core.privacy import PRIVACY_POLICY_VERSION
     from app.embedding.base import EmbeddingDescriptor
@@ -732,3 +726,176 @@ def test_api_reranker_empty_candidates_on_fresh_provider(tmp_path, monkeypatch) 
     assert provider.rerank("查询", []) == []
     assert probe == {"constructed": 0, "posted": 0}
     assert provider.loaded is False
+
+
+# ============================================================================
+# BUG-5-05：隐私清洗误删同一行的学术字段
+# ============================================================================
+
+MIXED_NAME_LINE = "姓名 张三 课程编号 QM-CS201 学分 3 学期 2026-2027-1"
+MIXED_NAME_EXPECTED = "姓名：[REDACTED_NAME] 课程编号 QM-CS201 学分 3 学期 2026-2027-1"
+
+MIXED_SPACED_NAME_LINE = "姓名：张 三 课程名称：数据结构 学分：3"
+MIXED_SPACED_NAME_EXPECTED = "姓名：[REDACTED_NAME] 课程名称：数据结构 学分：3"
+
+MIXED_STUDENT_ID_LINE = "学号 20260001 课程代码 QM-CS201 成绩 88"
+MIXED_STUDENT_ID_EXPECTED = "学号：[REDACTED_STUDENT_ID] 课程代码 QM-CS201 成绩 88"
+
+ACADEMIC_KEEP_TOKENS = ("QM-CS201", "数据结构", "学分", "学期", "成绩", "课程编号", "课程代码", "课程名称")
+
+
+def test_privacy_scrub_preserves_academic_fields_after_name() -> None:
+    from app.core.privacy import REDACTED_NAME, scrub
+
+    result = scrub(MIXED_NAME_LINE)
+    assert "张三" not in result
+    assert REDACTED_NAME in result
+    assert result == MIXED_NAME_EXPECTED
+
+
+def test_privacy_scrub_preserves_academic_fields_after_spaced_name() -> None:
+    from app.core.privacy import REDACTED_NAME, scrub
+
+    result = scrub(MIXED_SPACED_NAME_LINE)
+    assert "张 三" not in result
+    assert REDACTED_NAME in result
+    assert result == MIXED_SPACED_NAME_EXPECTED
+
+
+def test_privacy_scrub_preserves_academic_fields_after_student_id() -> None:
+    from app.core.privacy import REDACTED_STUDENT_ID, scrub
+
+    result = scrub(MIXED_STUDENT_ID_LINE)
+    assert "20260001" not in result
+    assert REDACTED_STUDENT_ID in result
+    assert result == MIXED_STUDENT_ID_EXPECTED
+
+
+def test_privacy_scrub_stops_at_common_field_boundaries() -> None:
+    """PII 值必须在下一个常见字段开始前停止，且不得吞掉字段间空白。"""
+    from app.core.privacy import REDACTED_NAME, REDACTED_STUDENT_ID, scrub
+
+    cases = [
+        ("姓名 李四 专业 计算机科学与技术", "姓名：[REDACTED_NAME] 专业 计算机科学与技术"),
+        ("姓名 李四 年级 2026", "姓名：[REDACTED_NAME] 年级 2026"),
+        ("姓名 李四 日期 2026-09-01", "姓名：[REDACTED_NAME] 日期 2026-09-01"),
+        ("姓名 李四 时间 08:00", "姓名：[REDACTED_NAME] 时间 08:00"),
+        ("姓名 李四 地点 教一楼", "姓名：[REDACTED_NAME] 地点 教一楼"),
+        ("姓名 李四 状态 已通过", "姓名：[REDACTED_NAME] 状态 已通过"),
+        ("姓名 李四 课程类别 专业必修", "姓名：[REDACTED_NAME] 课程类别 专业必修"),
+        ("姓名 李四 备注：无", "姓名：[REDACTED_NAME] 备注：无"),
+        ("姓名 李四 培养层次：本科", "姓名：[REDACTED_NAME] 培养层次：本科"),
+        ("学号 20260001 成绩 88", "学号：[REDACTED_STUDENT_ID] 成绩 88"),
+    ]
+    for raw, expected in cases:
+        assert scrub(raw) == expected, f"字段边界未生效：{raw!r}"
+
+
+def test_privacy_scrub_keeps_academic_tokens_in_mixed_lines() -> None:
+    from app.core.privacy import scrub
+
+    for raw in (MIXED_NAME_LINE, MIXED_SPACED_NAME_LINE, MIXED_STUDENT_ID_LINE):
+        result = scrub(raw)
+        for token in ACADEMIC_KEEP_TOKENS:
+            if token in raw:
+                assert token in result, f"{token!r} 被误删：{raw!r}"
+
+
+def test_redacted_value_length_is_bounded_by_a_constant() -> None:
+    """字段值匹配必须有真实总长度上限，不能靠无界重复伪装成有界。"""
+    from app.core.privacy import MAX_FIELD_VALUE_CHARS, scrub
+
+    placeholder = "姓名：[REDACTED_NAME]"
+    for size in (60, 400, 3000):
+        raw = "姓名 " + "阿" * size
+        result = scrub(raw)
+        assert result.startswith(placeholder)
+        removed = size - (len(result) - len(placeholder))
+        assert 0 < removed <= MAX_FIELD_VALUE_CHARS
+
+
+def test_privacy_scrub_is_idempotent_for_mixed_academic_lines() -> None:
+    from app.core.privacy import scrub
+
+    for raw in (MIXED_NAME_LINE, MIXED_SPACED_NAME_LINE, MIXED_STUDENT_ID_LINE):
+        once = scrub(raw)
+        assert scrub(once) == once
+
+
+def test_privacy_policy_version_is_v3() -> None:
+    from app.core.privacy import PRIVACY_POLICY_VERSION
+
+    assert PRIVACY_POLICY_VERSION == "external-privacy-v3"
+
+
+def test_privacy_v3_bumps_only_api_embedding_fingerprint(tmp_path) -> None:
+    from app.core.privacy import PRIVACY_POLICY_VERSION
+    from app.embedding.base import EmbeddingDescriptor
+
+    api = embedding_descriptor_for(_api_embedding_settings(tmp_path))
+    assert api.privacy_policy_version == PRIVACY_POLICY_VERSION
+    v2_baseline = EmbeddingDescriptor(
+        provider="api",
+        model=api.model,
+        revision="api",
+        dimension=api.dimension,
+        privacy_policy_version="external-privacy-v2",
+    )
+    assert api.fingerprint != v2_baseline.fingerprint
+    # 与 v1 也不同：任一版本变化都会改变 API Embedding 指纹
+    v1_baseline = EmbeddingDescriptor(
+        provider="api",
+        model=api.model,
+        revision="api",
+        dimension=api.dimension,
+        privacy_policy_version="external-privacy-v1",
+    )
+    assert api.fingerprint != v1_baseline.fingerprint
+
+    for provider in ("fake", "local"):
+        descriptor = embedding_descriptor_for(build_settings(tmp_path, embedding_provider=provider))
+        assert descriptor.privacy_policy_version is None
+        assert "privacy_policy_version" not in descriptor.as_dict()
+
+
+def test_api_reranker_preserves_academic_context_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.rerank.api", _rerank_response)
+    provider = ApiReranker(_api_rerank_settings(tmp_path))
+
+    documents = [MIXED_STUDENT_ID_LINE, MIXED_SPACED_NAME_LINE]
+    snapshot = list(documents)
+    provider.rerank(MIXED_NAME_LINE, documents)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in ("张三", "张 三", "20260001"):
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    assert "[REDACTED_NAME]" in serialized
+    assert "[REDACTED_STUDENT_ID]" in serialized
+    for token in ACADEMIC_KEEP_TOKENS:
+        assert token in serialized, f"外发 payload 丢失学术字段：{token}"
+    assert captured[0]["query"] == MIXED_NAME_EXPECTED
+    assert captured[0]["documents"] == [MIXED_STUDENT_ID_EXPECTED, MIXED_SPACED_NAME_EXPECTED]
+    assert documents == snapshot, "调用方持有的候选文本不得被改写"
+
+
+def test_api_embedding_preserves_academic_context_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.embedding.api", _embedding_response)
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+
+    texts = [MIXED_NAME_LINE, MIXED_STUDENT_ID_LINE, MIXED_SPACED_NAME_LINE]
+    snapshot = list(texts)
+    provider.embed_documents(texts)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in ("张三", "张 三", "20260001"):
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    assert "[REDACTED_NAME]" in serialized
+    assert "[REDACTED_STUDENT_ID]" in serialized
+    for token in ACADEMIC_KEEP_TOKENS:
+        assert token in serialized, f"外发 payload 丢失学术字段：{token}"
+    assert captured[0]["input"] == [
+        MIXED_NAME_EXPECTED,
+        MIXED_STUDENT_ID_EXPECTED,
+        MIXED_SPACED_NAME_EXPECTED,
+    ]
+    assert texts == snapshot, "调用方持有的文本不得被改写"

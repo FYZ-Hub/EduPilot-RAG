@@ -115,6 +115,20 @@
 - **资源保护**：默认 backend 镜像仍**没有** torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；**未下载模型、未运行真实模型、未安装重型依赖、未访问真实外部 API**。
 - **边界**：默认 Local 环境仍为 `degraded`，`embedding.ready=false`、`reranker.ready=false`、`chat=unconfigured`、`planning=unavailable`。阶段 6 仍未开始。
 
+### 阶段 5 混合字段边界修复（BUG-5-05 / external-privacy-v3）
+
+阶段 5 仍为 `completed`；**未开始阶段 6**。
+
+- 输出：`backend/app/core/privacy.py`（清洗策略 `external-privacy-v3`）、`backend/tests/test_stage5_fixes.py`（新增 11 项回归，移除 1 项被取代的 v2 版本断言）。未新增依赖、未改数据库 schema、未改 Compose 结构、未改动两个 API Provider 的调用点（继续共用同一个 `privacy.py`）。
+- **BUG-5-05（隐私清洗误删同一行学术字段）**：v2 的字段值只把「下一个 PII 标签 / 竖线 / 换行 / 句读」当作终止边界，因此 `姓名 张三 课程编号 QM-CS201 学分 3 学期 2026-2027-1` 会把**整行**当作姓名值吞掉（输出直接变成 `姓名：[REDACTED_NAME]`），学号行同理；`姓名：张 三 课程名称：数据结构 学分：3` 还会连带删掉「课程名称」并留下孤立冒号。
+- **修复方案（稳定的字段边界策略）**：新增 `_FIELD_BOUNDARY_LABELS`，把常见的普通字段名识别为边界 —— 课程编号 / 课程代码 / 课程名称 / 课程类别 / 课程性质、学分 / 学期 / 成绩 / 绩点、专业 / 年级 / 班级 / 学院 / 培养层次、日期 / 时间 / 地点 / 教室 / 校区、状态 / 类型 / 备注 / 说明；并新增 `_GENERIC_KEY_BOUNDARY`，把任意「字段名 + 冒号或等号」也视为边界。这些字段**只用于截断 PII 值，自身永不被清洗**。
+- **真实长度上限**：`_VALUE` 由「无界重复」改为**双重硬上限**（单 token ≤ `_VALUE_TOKEN_MAX_CHARS`=48 字符，token 数 ≤ 1+`_VALUE_EXTRA_TOKENS`=5），并导出 `MAX_FIELD_VALUE_CHARS`=240 供测试校验，杜绝「名为有界、实为无界」。PII 值在下一个字段开始前停止，**不吞掉字段间空白**与后续字段。
+- **版本与指纹影响**：`PRIVACY_POLICY_VERSION` 由 `external-privacy-v2` 提升为 **`external-privacy-v3`**（外发文本语义再次变化）。API Embedding descriptor 携带该版本 ⇒ `embedding_fingerprint` 变化并**按既有机制触发 API 向量重建**；Local / Fake Embedding 仍为 `None` 且不进入 `as_dict()` ⇒ 指纹与 `pipeline_fingerprint` 逐字节不变；Reranker 记录该版本但**仍不进入** `pipeline_fingerprint`，**不触发任何文档索引重建**。
+- **兼容性**：上一轮 8 种键值格式、TAB / 表格竖线、带内部空格的姓名、固定电话、幂等性、确定性、离线与「只清洗外发副本」全部继续成立；`3d3710b` 的空 Embedding readiness 修复未被破坏（空输入仍为 no-op）。
+- **验收**：`docker compose exec backend pytest` → **348 passed**（修复前 338）；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、日志隐私泄漏扫描全部符合预期。
+- **资源保护**：默认 backend 镜像仍无 torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；未下载模型、未运行真实模型、未安装新依赖、未访问真实外部 API。
+- **边界**：默认 Local 环境仍为 `degraded`（`embedding.ready=false`、`reranker.ready=false`、`chat=unconfigured`、`planning=unavailable`）。阶段 6 仍未开始。
+
 ## 阶段 4 结论（FTS5、混合检索与演示数据集原子激活）
 
 - 输出：`backend/app/search/`（`schema.py` FTS5 结构、`text.py` 确定性中文规范化与安全 MATCH 构造、`fts.py` 索引写入与精确对账、`eligibility.py` 可检索资格、`hydrate.py` 候选补全、`keyword.py` / `dense.py` / `hybrid.py` 三路检索）、`backend/app/demo/activation.py`（原子激活与退役）、`backend/app/api/retrieval.py`（`/api/sources/{chunk_id}`、`/api/retrieval/options`）、`backend/app/documents/categories.py`（类别中文标签）；`document_chunks.fts_rowid`、`demo_active_dataset.active_marker`；新增测试 `test_fts_index.py`、`test_keyword_retriever.py`、`test_retrieval_hybrid.py`、`test_reconciliation.py`、`test_activation.py`、`test_sources_api.py`。
