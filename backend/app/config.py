@@ -9,6 +9,7 @@ from __future__ import annotations
 from functools import lru_cache
 from typing import Literal
 
+from pydantic import field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Device = Literal["cpu", "cuda"]
@@ -90,6 +91,18 @@ class Settings(BaseSettings):
     keyword_top_k: int = 12
     rerank_top_k: int = 6
     retrieval_score_threshold: float | None = None
+
+    @field_validator("retrieval_score_threshold", mode="before")
+    @classmethod
+    def _blank_threshold_is_none(cls, value: object) -> object:
+        """空字符串（含纯空白）安全解析为 ``None``；阶段 6 绝不创造默认阈值。
+
+        非法值仍然报错，不做静默回退。
+        """
+        if isinstance(value, str) and not value.strip():
+            return None
+        return value
+
 
     # 上传
     max_upload_mb: int = 50

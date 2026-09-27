@@ -34,9 +34,16 @@ services:
       RERANK_BATCH_SIZE: "2"
       RERANK_LOCAL_FILES_ONLY: "true"
       RERANK_TIMEOUT_SECONDS: "30"
-      # LLM：缺省未配置，服务仍可启动
-      LLM_PROVIDER: openai_compatible
-      LLM_TIMEOUT_SECONDS: "60"
+      # LLM：缺省未配置，服务仍可启动；默认不指向任何真实外部 API
+      LLM_PROVIDER: ${LLM_PROVIDER:-openai_compatible}
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_TIMEOUT_SECONDS: ${LLM_TIMEOUT_SECONDS:-60}
+      LLM_ANSWER_MAX_CHARS: ${LLM_ANSWER_MAX_CHARS:-2000}
+      LLM_REWRITE_MAX_CHARS: ${LLM_REWRITE_MAX_CHARS:-300}
+      # 检索阈值：缺省为空，安全解析为 None（阶段 6 不创造默认阈值）
+      RETRIEVAL_SCORE_THRESHOLD: ${RETRIEVAL_SCORE_THRESHOLD:-}
     ports:
       - "8000:8000"
     volumes:

@@ -73,6 +73,17 @@
 - 默认 backend 镜像仍**没有** torch / sentence-transformers / 本地 LLM / 模型权重 / Hugging Face 缓存；`./data/models` 仍为空；**未下载或运行任何真实模型，未调用真实外部 API**。
 - 默认 Local 环境仍为 `degraded`：`embedding.ready=false`、`reranker.ready=false`、`llm=unconfigured`、`planning=unavailable`。
 
+### 阶段 6 修复轮（BUG-6-05 与外部 LLM 配置接线）
+
+阶段 6 继续保持 `completed`；阶段 7 保持 `not_started`。**本修复轮没有调用任何真实外部 API**（全部使用假配置与 MockTransport 验证）。
+
+- **BUG-6-05（跨版本冲突判定反向）**：`app/chat/conflict.py::_cross_version_conflicts()` 原先按**取值**索引旧记录，导致「同字段、不同版本、不同取值」不被识别，而「同字段、不同版本、相同取值」反被判为冲突。实测探针：`different=None`（应为冲突）、`same=ConflictHint(...)`（应无冲突）。已改为按 **字段名 → 版本 → 取值** 归集：只有「规范化字段名相同 + `document_version` 不同 + 取值不同」才构成跨版本冲突；同一版本内（含同一 chunk 内）重复字段不制造伪冲突；多版本多取值时 indices 排序、去重且与证据顺序无关；元数据字段（文档版本 / 生效日期 / 文档类型 / 适用学期 …）按定义就会不同，永不判为冲突。同文档跨切片课表冲突检测**保持不变**。
+- **冲突判定权归服务端**：模型自行返回 `outcome=conflict` 而服务端 `detect_conflicts()` 未发现冲突时，判为 `MODEL_RESPONSE_INVALID`（唯一 error，不向客户端输出 conflict）；服务端检测到冲突时强制 `outcome=conflict`、`reason_code=version_conflict`；冲突回答漏引任意一方的证据同样判为非法；`answered` 不允许携带 `reason_code`；`refused` 不允许携带 citation。BUG-6-02 的引用重映射修复未被破坏。
+- **外部 LLM 配置接线**：`docker-compose.yml` 通过 Compose 环境变量插值把 `LLM_PROVIDER` / `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` / `LLM_TIMEOUT_SECONDS` / `LLM_ANSWER_MAX_CHARS` / `LLM_REWRITE_MAX_CHARS` 与 `RETRIEVAL_SCORE_THRESHOLD` 传入 backend，默认值均为空或安全默认，**默认环境不指向任何真实外部 API**；`.env.example` 补齐 `LLM_ANSWER_MAX_CHARS` / `LLM_REWRITE_MAX_CHARS`；未提交任何真实 `.env` 或 API Key。
+- **阈值解析**：`RETRIEVAL_SCORE_THRESHOLD` 的空字符串（含纯空白）安全解析为 `None`（阶段 6 不创造默认阈值），非法值仍然报错、不静默回退；空值 / 合法浮点值 / 非法值三条路径均有测试。
+- **CORS 与 SSE 回归**：CORS 显式 `expose_headers=["X-Request-ID"]`（`allow_headers` 不等于 `expose_headers`），带 Origin 的请求可读到 `Access-Control-Expose-Headers`；新增 SSE 注入回归 —— 正文或 `quote` 中含换行与伪造的 `event: error\ndata: {...}` 时只能作为 JSON 字符串内容，事件行仍只有 `citation` / `token` / `done`，每个事件恰好一行 `data`，终止后零字节。
+- **验收**：新增 `tests/test_chat_conflict.py`、`tests/test_chat_config.py` 与 6 项 Chat 回归；`docker compose exec backend pytest` → **470 passed**；生成器 `--network none` → **72 passed**；前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet` 使用假值通过且未回显密钥；默认环境 `GET /api/health` 仍为 `degraded`、`chat=unconfigured`、`llm.ready=false`；未下载模型、未访问真实 API、未启动 GPU Profile。
+
 ### 未实现范围
 
 - 阶段 7 学分规则引擎、阶段 8 Vue Chat 页面与前端 SSE 解析、阶段 9 RAG 评测、问题改写之外的任何 LLM 能力（答案生成以外的引用流/多轮记忆持久化）；服务端**不保存**聊天历史，也没有新增数据库表。

@@ -137,6 +137,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         allow_credentials=True,
         allow_methods=["GET", "POST", "DELETE", "OPTIONS"],
         allow_headers=["*"],
+        # 前端需要读取 request ID 做问题定位：必须显式 expose（它不等于 allow_headers）
+        expose_headers=["X-Request-ID"],
     )
 
     application.add_exception_handler(ApiError, _api_error_handler)

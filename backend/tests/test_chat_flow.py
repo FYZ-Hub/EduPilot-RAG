@@ -99,6 +99,10 @@ def _turn(question: str = "毕业总学分是多少？", **kwargs) -> ChatTurn:
     )
 
 
+def _one_result(evidence):
+    return list(evidence("学分认定", top_k=2)[:1])
+
+
 def _plan_results(evidence):
     """取两个不同版本的培养方案 chunk，用于跨版本冲突。"""
     found: dict[str, object] = {}
@@ -288,9 +292,104 @@ def test_cross_version_conflict_reports_both_versions(chat_runtime, evidence, mo
     versions = {payload["document_version"] for payload in citations}
     assert len(versions) >= 2, "冲突必须并列展示双方版本"
     assert all(payload["effective_from"] for payload in citations)
+    # 冲突必须是「同一字段取值不同」：两份方案的总学分 155 / 160 都要真实出现
+    quoted = " ".join(payload["quote"] for payload in citations)
+    assert "155" in quoted and "160" in quoted, "引用必须真实包含冲突双方的取值"
     # 冲突提示必须写入提示词，要求并列展示且不得替用户选择版本
     assert "冲突" in llm.calls[-1][1]
     assert "不得替用户选择" in llm.calls[-1][1]
+    assert "155" in llm.calls[-1][1] and "160" in llm.calls[-1][1]
+
+
+def test_same_value_versions_do_not_report_a_conflict(chat_runtime, evidence, monkeypatch) -> None:
+    """两份版本内容一致时不得误判冲突（防止「相同字段相同值」造成的假通过）。"""
+    results = _plan_results(evidence)
+    identical = [
+        dataclasses.replace(
+            results[0],
+            chunk=dataclasses.replace(
+                results[0].chunk,
+                text="毕业总学分：160.0 学分。\n· 专业必修：60.0 学分",
+            ),
+        ),
+        dataclasses.replace(
+            results[1],
+            chunk=dataclasses.replace(
+                results[1].chunk,
+                text="毕业总学分：160.0 学分。\n· 专业必修：60.0 学分",
+            ),
+        ),
+    ]
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(identical))
+    llm = _EchoLLM()
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    events = parse_sse(b"".join(frames))
+    assert events[-1][1]["outcome"] == constants.CHAT_OUTCOME_ANSWERED
+
+
+# --- 冲突判定权属于服务端 ---------------------------------------------------
+
+
+def test_model_cannot_invent_a_conflict(chat_runtime, evidence, monkeypatch) -> None:
+    """服务端没有冲突证据时，模型自行声明 conflict 必须判为非法结构。"""
+    results = _one_result(evidence)
+    duplicated = list(results) + list(results)
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(duplicated))
+    llm = _StubLLM(answer=_completion("conflict", "见 [1] 与 [2]。", [1, 2]))
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    events = parse_sse(b"".join(frames))
+
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert events[0][1]["code"] == MODEL_RESPONSE_INVALID
+    assert not [name for name, _ in events if name == "citation"]
+
+
+def test_server_forces_conflict_even_if_model_answers(chat_runtime, evidence, monkeypatch) -> None:
+    results = _plan_results(evidence)
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(results))
+    llm = _EchoLLM()  # 返回 answered，但引用覆盖全部证据
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    events = parse_sse(b"".join(frames))
+
+    assert events[-1][0] == "done"
+    assert events[-1][1]["outcome"] == constants.CHAT_OUTCOME_CONFLICT
+    assert events[-1][1]["reason_code"] == constants.REASON_VERSION_CONFLICT
+
+
+def test_conflict_missing_one_side_is_invalid(chat_runtime, evidence, monkeypatch) -> None:
+    results = _plan_results(evidence)
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(results))
+    llm = _StubLLM(answer=_completion("answered", "只看 [1]。", [1]))
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    events = parse_sse(b"".join(frames))
+
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert events[0][1]["code"] == MODEL_RESPONSE_INVALID
+
+
+def test_answered_with_reason_code_is_invalid(chat_runtime, evidence, monkeypatch) -> None:
+    results = _one_result(evidence)
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(results))
+    llm = _StubLLM(
+        answer=_completion("answered", "见 [1]。", [1], reason=constants.REASON_NO_EVIDENCE)
+    )
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    events = parse_sse(b"".join(frames))
+    assert len(events) == 1
+    assert events[0][0] == "error"
+    assert events[0][1]["code"] == MODEL_RESPONSE_INVALID
 
 
 def test_schedule_conflict_is_detected(chat_runtime, evidence, monkeypatch) -> None:

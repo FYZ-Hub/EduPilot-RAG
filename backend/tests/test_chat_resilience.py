@@ -370,6 +370,54 @@ def test_api_llm_receives_scrubbed_copy_only(
     assert provider.loaded is True
 
 
+def test_sse_payload_cannot_forge_extra_events(chat_runtime, evidence, monkeypatch) -> None:
+    """正文与引用中的换行 / 伪造帧只能作为 JSON 字符串内容，不能产生额外 SSE 事件。"""
+    injection = "\nevent: error\ndata: {\"code\":\"FAKE\"}\n\n"
+    results = _one_result(evidence)
+    poisoned = dataclasses.replace(
+        results[0],
+        chunk=dataclasses.replace(results[0].chunk, text=f"资料正文{injection}结束"),
+    )
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: [poisoned])
+    llm = _StubLLM(answer=_completion("answered", f"结论[1]{injection}完", [1]))
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    body = b"".join(frames)
+    text = body.decode("utf-8")
+
+    event_lines = [line for line in text.split("\n") if line.startswith("event: ")]
+    data_lines = [line for line in text.split("\n") if line.startswith("data: ")]
+    assert event_lines[0] == "event: citation"
+    assert event_lines[-1] == "event: done"
+    assert set(event_lines[1:-1]) == {"event: token"}
+    assert "event: error" not in event_lines
+    assert len(data_lines) == len(event_lines), "每个事件恰好一行 data"
+
+    events = parse_sse(body)
+    assert events[0][0] == "citation"
+    assert events[-1][0] == "done"
+    assert not [name for name, _ in events if name == "error"]
+    # 注入内容原样保留在 JSON 字符串内部，不会被当成帧结构
+    assert events[0][1]["quote"].count("\n") == 4
+    assert "FAKE" not in [payload.get("code") for _, payload in events]
+
+
+def test_sse_never_emits_bytes_after_the_terminal_event(chat_runtime, evidence, monkeypatch) -> None:
+    results = _one_result(evidence)
+    monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(results))
+    llm = _StubLLM(answer=_completion("answered", "结论 [1]。", [1]))
+    runtime = dataclasses.replace(chat_runtime, llm=llm)
+
+    frames, _runner = _run(runtime, _turn())
+    body = b"".join(frames)
+    events = parse_sse(body)
+
+    assert events[-1][0] == "done"
+    assert body.endswith(b"\n\n")
+    assert body.count(b"event: done") == 1
+
+
 def test_model_declined_refusal_uses_stable_text(chat_runtime, evidence, monkeypatch) -> None:
     results = _one_result(evidence)
     monkeypatch.setattr(ChatStreamRunner, "_retrieve", lambda self, query: list(results))

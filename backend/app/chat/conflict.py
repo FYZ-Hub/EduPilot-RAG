@@ -79,19 +79,33 @@ def _rows(text: str) -> list[list[str]]:
 
 
 def _cross_version_conflicts(evidence: Sequence[EvidenceItem]) -> list[tuple[int, int, str]]:
-    """返回 ``(左编号, 右编号, 字段名)``；只比较**不同 document_version** 的证据。"""
-    seen: dict[str, dict[str, tuple[int, str]]] = {}
-    found: list[tuple[int, int, str]] = []
+    """返回 ``(左编号, 右编号, 字段名)``。
+
+    语义：**同一规范化字段名**在不同 ``document_version`` 上给出**不同取值**才算冲突。
+    同一版本内重复出现同一字段（含同一 chunk 内重复）不构成跨版本冲突。
+    """
+    # key -> version -> (规范化取值, 首次出现的证据编号)
+    observed: dict[str, dict[str, tuple[str, int]]] = {}
     for index, text, version, _doc_id in evidence:
         for key, value in extract_pairs(text):
-            by_version = seen.setdefault(key, {})
-            previous = by_version.get(value)
-            if previous is None:
-                by_version[value] = (index, version or "")
-                continue
-            other_index, other_version = previous
-            if other_index != index and other_version != (version or ""):
-                found.append((min(other_index, index), max(other_index, index), key))
+            observed.setdefault(key, {}).setdefault(version or "", (value, index))
+
+    found: list[tuple[int, int, str]] = []
+    seen: set[tuple[int, int, str]] = set()
+    for key in sorted(observed):
+        by_version = observed[key]
+        versions = sorted(by_version)
+        for position, left_version in enumerate(versions):
+            left_value, left_index = by_version[left_version]
+            for right_version in versions[position + 1 :]:
+                right_value, right_index = by_version[right_version]
+                if left_value == right_value or left_index == right_index:
+                    continue
+                pair = (min(left_index, right_index), max(left_index, right_index), key)
+                if pair not in seen:
+                    seen.add(pair)
+                    found.append(pair)
+    found.sort()
     return found
 
 

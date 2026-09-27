@@ -222,6 +222,16 @@ def test_sse_framing_is_raw_utf8_single_line_json(ingest_demo, client) -> None:
     assert indices == list(range(1, len(citations) + 1))
 
 
+def test_cors_exposes_request_id_header(client) -> None:
+    """必须显式 expose X-Request-ID；allow_headers 不等于 expose_headers。"""
+    origin = client.app.state.context.settings.cors_origin_list[0]
+    response = client.get("/api/health", headers={"Origin": origin})
+    assert response.status_code == 200
+    exposed = response.headers.get("access-control-expose-headers", "")
+    assert REQUEST_ID_HEADER.lower() in exposed.lower()
+    assert response.headers.get(REQUEST_ID_HEADER)
+
+
 def test_sse_never_emits_events_outside_the_contract(ingest_demo, client) -> None:
     ingest_demo()
     response = client.post(CHAT_URL, json=_body({"role": "user", "content": "数据结构属于什么课程类别？"}))

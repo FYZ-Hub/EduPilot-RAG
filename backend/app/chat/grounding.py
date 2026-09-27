@@ -76,6 +76,14 @@ def parse_grounded_completion(
     if reason_code is not None and reason_code not in constants.CHAT_REASON_CODES:
         raise _invalid("bad_reason_code")
 
+    # 冲突判定权属于服务端：没有服务端冲突证据时，模型不得自行声明 conflict
+    if outcome == constants.CHAT_OUTCOME_CONFLICT and not required_indices:
+        raise _invalid("conflict_without_server_evidence")
+
+    # answered 不允许携带 reason_code（拒答/冲突才需要解释原因）
+    if outcome == constants.CHAT_OUTCOME_ANSWERED and reason_code is not None:
+        raise _invalid("answered_with_reason_code")
+
     answer = payload.get("answer")
     if not isinstance(answer, str) or not answer.strip():
         raise _invalid("empty_answer")
