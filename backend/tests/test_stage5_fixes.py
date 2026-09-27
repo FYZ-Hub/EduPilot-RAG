@@ -509,3 +509,226 @@ def test_rerank_elapsed_ms_only_counts_reranker_stage(
     assert diagnostics.rerank_elapsed_ms == 250
     # Hybrid 时间仍然保留在检索诊断里
     assert diagnostics.retrieval.elapsed_ms >= 0
+
+
+# ============================================================================
+# 阶段 5 最终边界修复：BUG-5-03（隐私清洗覆盖）/ BUG-5-04（空输入 readiness）
+# ============================================================================
+
+# 常见键值格式：空格 / 冒号 + 内部空格 / 表格竖线 / TAB
+NAME_SAMPLES = [
+    ("姓名 张三", "姓名：[REDACTED_NAME]"),
+    ("姓名：张 三", "姓名：[REDACTED_NAME]"),
+    ("| 姓名 | 张三 |", "| 姓名：[REDACTED_NAME] |"),
+    ("姓名\t张三", "姓名：[REDACTED_NAME]"),
+]
+STUDENT_ID_SAMPLES = [
+    ("学号 20260001", "学号：[REDACTED_STUDENT_ID]"),
+    ("| 学号 | 20260001 |", "| 学号：[REDACTED_STUDENT_ID] |"),
+]
+LANDLINE_SAMPLES = [
+    ("电话 010-12345678", "电话：[REDACTED_PHONE]"),
+    ("电话：(010) 12345678", "电话：[REDACTED_PHONE]"),
+]
+FORMAT_SAMPLES = NAME_SAMPLES + STUDENT_ID_SAMPLES + LANDLINE_SAMPLES
+
+# 学术术语：绝不能被误清洗
+ACADEMIC_SAFE_TEXT = (
+    "课程编号：QM-CS201 课程名称：数据结构 学分：3 "
+    "学期：2026-2027-1 开课日期：2026-09-01 总学分 160 已修 120"
+)
+
+
+def _forbid_http(monkeypatch, module_path: str) -> dict:
+    """替换 httpx.Client：记录构造与请求次数，任何真实 POST 都直接失败。"""
+    probe = {"constructed": 0, "posted": 0}
+
+    class _NoHttpClient:
+        def __init__(self, *args, **kwargs):
+            probe["constructed"] += 1
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *exc_info):
+            return False
+
+        def post(self, *args, **kwargs):
+            probe["posted"] += 1
+            raise AssertionError("不得在没有真实输入时发出 HTTP 请求")
+
+    monkeypatch.setattr(f"{module_path}.httpx.Client", _NoHttpClient)
+    return probe
+
+
+def test_privacy_scrub_covers_common_key_value_formats() -> None:
+    from app.core.privacy import scrub
+
+    for raw, expected in FORMAT_SAMPLES:
+        assert scrub(raw) == expected, f"未按预期清洗：{raw!r}"
+
+
+def test_privacy_scrub_removes_leaked_identifiers_in_all_formats() -> None:
+    from app.core.privacy import scrub
+
+    for raw, _expected in NAME_SAMPLES:
+        assert "张三" not in scrub(raw)
+    for raw, _expected in STUDENT_ID_SAMPLES:
+        assert "20260001" not in scrub(raw)
+    for raw, _expected in LANDLINE_SAMPLES:
+        assert "12345678" not in scrub(raw)
+
+
+def test_privacy_scrub_is_idempotent_for_new_formats() -> None:
+    from app.core.privacy import scrub
+
+    for raw, _expected in FORMAT_SAMPLES:
+        once = scrub(raw)
+        assert scrub(once) == once
+
+
+def test_privacy_scrub_does_not_over_redact_academic_terms() -> None:
+    from app.core.privacy import scrub
+
+    assert scrub(ACADEMIC_SAFE_TEXT) == ACADEMIC_SAFE_TEXT
+
+
+def test_privacy_policy_version_is_v2() -> None:
+    from app.core.privacy import PRIVACY_POLICY_VERSION
+
+    assert PRIVACY_POLICY_VERSION == "external-privacy-v2"
+
+
+def test_privacy_v2_bumps_only_api_embedding_fingerprint(tmp_path) -> None:
+    from app.core.privacy import PRIVACY_POLICY_VERSION
+    from app.embedding.base import EmbeddingDescriptor
+
+    api = embedding_descriptor_for(_api_embedding_settings(tmp_path))
+    assert api.privacy_policy_version == PRIVACY_POLICY_VERSION
+    v1_baseline = EmbeddingDescriptor(
+        provider="api",
+        model=api.model,
+        revision="api",
+        dimension=api.dimension,
+        privacy_policy_version="external-privacy-v1",
+    )
+    assert api.fingerprint != v1_baseline.fingerprint
+
+    # Local / Fake 不含该字段，指纹与 pipeline_fingerprint 不受影响
+    for provider in ("fake", "local"):
+        descriptor = embedding_descriptor_for(build_settings(tmp_path, embedding_provider=provider))
+        assert descriptor.privacy_policy_version is None
+        assert "privacy_policy_version" not in descriptor.as_dict()
+
+
+def test_api_reranker_scrubs_new_formats_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.rerank.api", _rerank_response)
+    provider = ApiReranker(_api_rerank_settings(tmp_path))
+
+    query = "；".join(raw for raw, _ in FORMAT_SAMPLES)
+    documents = [raw for raw, _ in FORMAT_SAMPLES]
+    snapshot = list(documents)
+
+    provider.rerank(query, documents)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in ("张三", "20260001", "12345678", "010-12345678"):
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    assert captured[0]["query"] != query
+    assert documents == snapshot, "调用方持有的候选文本不得被改写"
+
+
+def test_api_embedding_scrubs_new_formats_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.embedding.api", _embedding_response)
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+
+    texts = [raw for raw, _ in FORMAT_SAMPLES]
+    snapshot = list(texts)
+    provider.embed_documents(texts)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in ("张三", "20260001", "12345678", "010-12345678"):
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    assert texts == snapshot, "调用方持有的文本不得被改写"
+
+
+# --- BUG-5-04：空 Embedding 输入伪造 readiness --------------------------------
+
+
+def test_api_embedding_empty_input_returns_empty_without_http(tmp_path, monkeypatch) -> None:
+    probe = _forbid_http(monkeypatch, "app.embedding.api")
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+    assert provider.loaded is False
+
+    assert provider.embed_documents([]) == []
+    assert probe == {"constructed": 0, "posted": 0}, "空输入不得创建 HTTP Client 或发出请求"
+    assert provider.loaded is False, "空输入不得把 readiness 伪造为 true"
+
+
+def test_api_embedding_empty_input_must_not_flip_readiness(tmp_path) -> None:
+    """原始错误行为：loaded=False → embed_documents([])=[] → loaded=True（无任何请求）。"""
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+    loaded_before = provider.loaded
+    result = provider.embed_documents([])
+    loaded_after = provider.loaded
+
+    assert (loaded_before, result, loaded_after) == (False, [], False)
+
+
+def test_api_embedding_empty_input_keeps_existing_success(tmp_path, monkeypatch) -> None:
+    _capture_requests(monkeypatch, "app.embedding.api", _embedding_response)
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+
+    provider.embed_documents(["一段普通文本"])
+    assert provider.loaded is True
+
+    # 空输入是 no-op：不得凭空清除既有的成功证据
+    assert provider.embed_documents([]) == []
+    assert provider.loaded is True
+
+
+def test_api_embedding_becomes_ready_only_after_real_validated_response(
+    tmp_path, monkeypatch
+) -> None:
+    captured = _capture_requests(monkeypatch, "app.embedding.api", _embedding_response)
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+
+    assert provider.loaded is False
+    provider.embed_documents(["文本"])
+    assert len(captured) == 1, "必须真的发出一次请求"
+    assert provider.loaded is True
+
+    # 失败响应（结构非法）必须回落为 false
+    monkeypatch.setattr(
+        "app.embedding.api.httpx.Client",
+        _raising_client(RuntimeError("upstream down")),
+    )
+    with pytest.raises(ApiError):
+        provider.embed_documents(["文本"])
+    assert provider.loaded is False
+
+    provider.close()
+    assert provider.loaded is False
+
+
+def test_api_reranker_empty_candidates_remain_a_no_op(tmp_path, monkeypatch) -> None:
+    _capture_requests(monkeypatch, "app.rerank.api", _rerank_response)
+    provider = ApiReranker(_api_rerank_settings(tmp_path))
+    provider.rerank("查询", ["候选甲"])
+    assert provider.loaded is True
+
+    probe = _forbid_http(monkeypatch, "app.rerank.api")
+
+    assert provider.rerank("查询", []) == []
+    assert probe == {"constructed": 0, "posted": 0}, "空候选不得创建 HTTP Client 或发出请求"
+    # 空候选是 no-op：不清除既有成功证据，也不伪造新的
+    assert provider.loaded is True
+
+
+def test_api_reranker_empty_candidates_on_fresh_provider(tmp_path, monkeypatch) -> None:
+    probe = _forbid_http(monkeypatch, "app.rerank.api")
+    provider = ApiReranker(_api_rerank_settings(tmp_path))
+
+    assert provider.rerank("查询", []) == []
+    assert probe == {"constructed": 0, "posted": 0}
+    assert provider.loaded is False

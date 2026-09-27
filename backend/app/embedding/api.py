@@ -53,6 +53,10 @@ class ApiEmbeddingProvider(EmbeddingProvider):
             )
 
     def embed_documents(self, texts: Sequence[str]) -> list[list[float]]:
+        if not texts:
+            # 空输入是 no-op：不创建 HTTP Client、不发送请求，
+            # 也不改变 readiness —— 空输入既不能伪造成功，也不能清除既有成功证据。
+            return []
         try:
             vectors = self._embed(texts)
         except Exception:

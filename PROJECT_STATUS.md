@@ -103,6 +103,18 @@
 - **资源保护**：默认 backend 镜像仍**没有** torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；未下载任何模型、未安装重型依赖、未启动 GPU Profile。
 - **边界**：**真实 Local 模型仍未下载、未运行**，默认 Local 环境 `embedding.ready=false`、`reranker.ready=false`，整体仍为 `degraded`（`chat=unconfigured`、`planning=unavailable`）。阶段 6 仍未开始。
 
+### 阶段 5 最终边界修复（BUG-5-03 / BUG-5-04）
+
+阶段 5 仍为 `completed`；**未开始阶段 6**。
+
+- 输出：`backend/app/core/privacy.py`（清洗策略 `external-privacy-v2`）、`backend/app/embedding/api.py`（空输入 no-op）、`backend/tests/test_stage5_fixes.py`（新增 14 项回归）。未新增依赖、未改数据库 schema、未改 Compose 结构。
+- **BUG-5-03（隐私清洗覆盖不足）**：v1 只覆盖 `标签 + 冒号 + 无空格值`，因此 `姓名 张三`、`姓名：张 三`（只遮掉「张」残留「三」）、`| 姓名 | 张三 |`、`姓名<TAB>张三`、`学号 20260001`、`| 学号 | 20260001 |`、`电话 010-12345678`、`电话：(010) 12345678` 都会把个人信息原样发给外部模型。已在**同一个共享模块**中扩展（不在两个 Provider 里复制规则）：分隔符覆盖**冒号 / 等号 / 空白 / TAB / Markdown 与表格竖线**；标签值允许**内部空格**并清洗到稳定字段边界（遇到下一个 PII 标签、竖线、换行或中文句读即停）；新增**中国大陆固定电话**（`0xx`/`0xxx` 区号，含 `(010)` 括号形式）与带标签的电话规则。课程代码（`QM-CS201`）、课程名称、学分、学期、日期、普通数字**不被误清洗**。仍保持确定性、幂等、完全离线、无 NER、无第三方服务；只清洗外发副本，原 query / candidates / SQLite / Chroma / FTS / citation / quote 零改动。
+- **版本与指纹影响**：`PRIVACY_POLICY_VERSION` 由 `external-privacy-v1` 提升为 **`external-privacy-v2`**（值语义变化必须提升版本）。API Embedding descriptor 带上该版本 ⇒ `embedding_fingerprint` 改变并**按既有机制触发 API 向量重建**；Local / Fake Embedding 仍为 `None` 且**不进入** `as_dict()` ⇒ 指纹与 `pipeline_fingerprint` 逐字节不变；Reranker 描述符记录该版本但**仍不进入** `pipeline_fingerprint`，**不触发任何文档索引重建**。
+- **BUG-5-04（空 Embedding 输入伪造 readiness）**：`embed_documents([])` 此前会构造 HTTP Client（无请求）并返回 `[]`，随后把 `loaded` 从 `false` 置为 `true`，属于「没有真实请求却谎报 ready」。已改为**空输入直接 no-op**：返回 `[]`、不创建 Client、不发送请求，且**既不能伪造成功、也不清除既有成功证据**；只有非空输入经过真实请求并成功校验响应结构后才 `false → true`，失败或 `close()` 后仍恢复 `false`。ApiReranker 的空候选 no-op 行为保持不变（有回归测试）。
+- **验收**：`docker compose exec backend pytest` → **338 passed**（修复前 324，+14）；`docker run --rm --network none … pytest tests/test_stage5_fixes.py tests/test_rerank_provider.py` → **62 passed**；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、`logs` 全部符合预期，日志隐私泄漏扫描无命中。
+- **资源保护**：默认 backend 镜像仍**没有** torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；**未下载模型、未运行真实模型、未安装重型依赖、未访问真实外部 API**。
+- **边界**：默认 Local 环境仍为 `degraded`，`embedding.ready=false`、`reranker.ready=false`、`chat=unconfigured`、`planning=unavailable`。阶段 6 仍未开始。
+
 ## 阶段 4 结论（FTS5、混合检索与演示数据集原子激活）
 
 - 输出：`backend/app/search/`（`schema.py` FTS5 结构、`text.py` 确定性中文规范化与安全 MATCH 构造、`fts.py` 索引写入与精确对账、`eligibility.py` 可检索资格、`hydrate.py` 候选补全、`keyword.py` / `dense.py` / `hybrid.py` 三路检索）、`backend/app/demo/activation.py`（原子激活与退役）、`backend/app/api/retrieval.py`（`/api/sources/{chunk_id}`、`/api/retrieval/options`）、`backend/app/documents/categories.py`（类别中文标签）；`document_chunks.fts_rowid`、`demo_active_dataset.active_marker`；新增测试 `test_fts_index.py`、`test_keyword_retriever.py`、`test_retrieval_hybrid.py`、`test_reconciliation.py`、`test_activation.py`、`test_sources_api.py`。
