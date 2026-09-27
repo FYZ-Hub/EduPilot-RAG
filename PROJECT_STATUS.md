@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 6 已完成（SSE 问答与引用）**
-- 下一阶段：**阶段 7 — 确定性学分规则引擎**
+- 当前阶段：**阶段 7 进行中（确定性学分规则引擎，本轮完成 7A）**
+- 下一阶段：**阶段 7B — 演示投影与 records/rules 导入**，随后 7C — 规划 API 与全量验收
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -17,10 +17,56 @@
 | 4 | FTS5 与混合检索 | completed |
 | 5 | Reranker | completed |
 | 6 | SSE 问答与引用 | completed |
-| 7 | 确定性学分规则引擎 | not_started |
+| 7 | 确定性学分规则引擎 | in_progress |
 | 8 | Vue 核心页面 | not_started |
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 7A 结论（确定性学分规则引擎 · 持久化与纯计算）
+
+阶段 7 为 `in_progress`：本轮只完成 7A（持久化模型 + 增量建表 + Decimal 确定性纯计算引擎 + 核心单测）。**7B / 7C 只设计接口，尚未实现**；阶段 8 保持 `not_started`。**学分完全由确定性规则计算，LLM 未参与任何数字计算。**
+
+### 持久化模型与迁移方式
+
+- 新增规范化 SQLite 表（全部挂在同一个 `Base` 上）：`academic_record_sets`、`course_records`、`academic_rule_sets`、`degree_rules`、`degree_rule_courses`、`academic_projections`。
+- **迁移方式**：沿用既有 `app.db.init_database`（`Base.metadata.create_all` + 幂等 `ALTER TABLE ADD COLUMN`）**增量创建新表**；不引入 Alembic，不删除、不重建任何既有表，既有数据保持不变（有回归测试）。
+- `credits` / `minimum_credits` 一律以**一位小数字符串**落库：SQLite 的 NUMERIC 走浮点会引入漂移，字符串往返后由 `Decimal` 精确解析，保证重启后计算结果逐字节一致。
+- 追溯关系：`source_doc_id` 外键指向真实 `documents.id`（有 FK 约束测试），`source_chunk_id` 指向真实 `document_chunks.id`；无法建立真实来源时不得伪造 ID。
+- 幂等：`academic_record_sets` 唯一键 `(source_type, source_key, content_hash)`；`academic_rule_sets` 唯一键 `(source_type, source_key, major, rule_version, content_hash)`；`degree_rules` 唯一键 `(rule_set_id, category)`；`degree_rule_courses` 唯一键 `(rule_set_id, course_code)`；`academic_projections` 唯一键 `(source_type, source_key, dataset_version)`。demo 与 upload 通过 `source_type` / `source_key` 保持独立所有权。
+- 级联：删除规则集合会级联删除其类别与课程目录行（有测试）；`course_records` 随 `academic_record_sets` 级联删除。
+
+### 确定性计算引擎（`app/academic/engine.py`）
+
+纯函数 `compute_plan(records, rule, ...)`，只接收已规范化的 `CourseRecord` 与 `DegreeRuleSet`，**不访问数据库、文件、网络、LLM、Embedding 或 Reranker**（有源码级依赖守卫测试）。
+
+- 内部全程 `Decimal`，对外统一量化到一位小数；拒绝 NaN / Infinity / 负学分 / 未知状态 / 空课程代码。
+- `passed` 计入 `completed_credits`；`in_progress` 计入 `in_progress_credits`；`failed` 不计分。
+- 同一 `course_code` 的正考 / 补考 / 重修**只计一次**；重复通过、重复在修同样只计一次。
+- `passed` 与 `in_progress` 互斥，`passed` 优先；两者并存时额外产生 `COURSE_RECORD_CONTRADICTION` warning。
+- 学分与类别**优先取用户显式选择的 rule set 课程目录**，不混入其它版本；记录类别与规则不一致时按规则计分（不双重计分）并产生 `COURSE_CATEGORY_MISMATCH` warning。
+- `remaining_credits = max(required - completed - in_progress, 0)`；每个 `CategoryGap.remaining_credits` 同样钳制在 0，**任何路径都不产生负数**。
+- 必修课程：`passed` 或 `in_progress` 即视为已覆盖、不列入 missing；`failed` 仍列入；总学分缺口为 0 时仍保留未满足的 missing 列表。
+- 未知必修课程不做猜测：以课程代码占位、学分 0，并产生 `REQUIRED_COURSE_UNKNOWN` warning。
+- 冲突 warning（稳定顺序）：`DEGREE_PLAN_VERSION_CONFLICT`、`COURSE_TIME_CONFLICT`、`COURSE_CATEGORY_MISMATCH`、`COURSE_RECORD_CONTRADICTION`、`COURSE_NOT_IN_RULE_CATALOG`、`REQUIRED_COURSE_UNKNOWN`；`severity` 只取 `warning` / `blocking`。
+- `PlanningEvidence` 严格 11 个白名单字段，按 `chunk_id` 去重后以 `(doc_id, chunk_id)` 稳定排序，不含路径、分数、`source_key` 或内部诊断。
+- `planning_result_payload()` 输出顺序固定、数字一位小数，相同输入产生逐字节一致的结果。
+
+### 数据结构（严格对齐 PRODUCT_SPEC 5.2）
+
+`CourseRecord`、`DegreeRule`、`PlanningResult`、`MissingRequiredCourse`、`CategoryGap`、`ConflictWarning`、`PlanningEvidence` 字段与文档逐一核对，**未增删字段**；`PlanningResult` 额外携带只读的 `major` / `rule_version` 用于审计与测试对照，不参与计算。
+
+### 投影职责边界（7A 只定义接口与纯函数）
+
+- 业务字段**只从正式解析后的 `DocumentBlock`** 提取；`SourceBlock.block_type` 必须属于表格类，**传入 chunk 文本会直接报错**，杜绝「从带重叠的 chunk 重复生成课程记录导致重复计分」。
+- `DocumentChunk` 仅用于建立 `source_chunk_id` 与 `PlanningEvidence` 定位。
+- 提供 `project_course_records()`（表头别名 + 状态别名 + 空行跳过 + 非法取值报错）、`build_rule_set()`、`record_set_fingerprint()`、`rule_set_fingerprint()` 等纯函数。
+- 真实演示资料的投影落库安排在 7B；`POST /api/academic/plan`、真实证据映射、冲突证据与 health planning 状态安排在 7C。
+
+### 本轮验收
+
+- 新增 `tests/test_academic_engine.py`（49 项）与 `tests/test_academic_models.py`（8 项），覆盖计分规则、重修 / 在修 / 重复记录、类别优先级、missing、缺口钳制、Decimal 精度、确定性、非法输入、投影纯函数、隔离性守卫，以及新表创建、增量迁移、唯一约束、级联、外键、精确小数往返与重启恢复。
+- `docker compose exec backend pytest` → **519 passed**；生成器 `--network none` → 72 passed；前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`（`degraded`、`planning=unavailable`）均符合预期。
+- 未调用任何真实 API、未下载或加载模型、未启动 GPU Profile；默认镜像仍无 torch / sentence-transformers。
 
 ## 阶段 6 结论（SSE 问答与引用）
 

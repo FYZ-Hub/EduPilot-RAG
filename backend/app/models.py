@@ -276,3 +276,230 @@ class DemoActiveDataset(Base):
     activated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
     # 活动行写常量 1；部分唯一索引只在 active_marker IS NOT NULL 时生效
     active_marker: Mapped[int | None] = mapped_column(Integer, default=1)
+
+
+# ---------------------------------------------------------------------------
+# 阶段 7A：学业规划（课程记录集合 / 培养方案规则集合）
+#
+# ``credits`` / ``minimum_credits`` 一律以**字符串**保存一位小数：
+# SQLite 的 NUMERIC 走浮点，会引入二进制漂移；字符串往返后由 ``Decimal`` 精确解析，
+# 保证同一输入在任意进程重启后得到逐字节一致的计算结果。
+# 所有表都由 ``init_database`` 的 ``create_all`` 增量创建，不重建也不删除既有表。
+# ---------------------------------------------------------------------------
+
+
+class AcademicRecordSet(Base):
+    """一组课程记录（一次导入或一个演示学生的成绩投影）。"""
+
+    __tablename__ = "academic_record_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    # upload / demo：两套来源空间保持独立所有权
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(640), nullable=False)
+    dataset_version: Mapped[str | None] = mapped_column(String(64))
+    activation_state: Mapped[str | None] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=constants.STATUS_QUEUED)
+    # 仅安全显示名（例如「匿名学生A · 课程记录」），绝不保存学号或真实姓名
+    display_name: Mapped[str] = mapped_column(String(160), nullable=False)
+    major: Mapped[str | None] = mapped_column(String(128))
+    admission_year: Mapped[int | None] = mapped_column(Integer)
+    record_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    # 内容指纹：同一来源重复导入同一内容不得无限创建重复选项
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    # 追溯：必须引用真实 Document；无法建立真实来源时不得伪造 ID
+    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("document_chunks.id")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    records: Mapped[list["CourseRecordRow"]] = relationship(
+        back_populates="record_set", cascade="all, delete-orphan", order_by="CourseRecordRow.ordinal"
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type", "source_key", "content_hash", name="uq_record_set_source_content"
+        ),
+        Index("ix_record_sets_source", "source_type", "source_key"),
+    )
+
+
+class CourseRecordRow(Base):
+    """单条课程记录；字段与 PRODUCT_SPEC 5.2 ``CourseRecord`` 一一对应。"""
+
+    __tablename__ = "course_records"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    record_set_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("academic_record_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    course_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    course_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    # 一位小数的字符串形式，禁止用浮点列造成精度漂移
+    credits: Mapped[str] = mapped_column(String(8), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    grade: Mapped[str | None] = mapped_column(String(32))
+    status: Mapped[str] = mapped_column(String(16), nullable=False)
+    semester: Mapped[str | None] = mapped_column(String(32))
+    schedule: Mapped[str | None] = mapped_column(String(64))
+    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("document_chunks.id")
+    )
+    source_block_id: Mapped[str | None] = mapped_column(String(128))
+    sheet_name: Mapped[str | None] = mapped_column(String(64))
+    row_start: Mapped[int | None] = mapped_column(Integer)
+    row_end: Mapped[int | None] = mapped_column(Integer)
+
+    record_set: Mapped[AcademicRecordSet] = relationship(back_populates="records")
+
+    __table_args__ = (
+        UniqueConstraint("record_set_id", "ordinal", name="uq_course_record_ordinal"),
+        Index("ix_course_records_set", "record_set_id"),
+        Index("ix_course_records_code", "course_code"),
+    )
+
+
+class AcademicRuleSet(Base):
+    """一个培养方案版本（规则集合）；同一专业可有多个版本同时存在。"""
+
+    __tablename__ = "academic_rule_sets"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(640), nullable=False)
+    dataset_version: Mapped[str | None] = mapped_column(String(64))
+    activation_state: Mapped[str | None] = mapped_column(String(16))
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=constants.STATUS_QUEUED)
+    display_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    major: Mapped[str] = mapped_column(String(128), nullable=False)
+    admission_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    effective_from: Mapped[str | None] = mapped_column(String(32))
+    # 毕业总学分（一位小数字符串）
+    required_credits: Mapped[str] = mapped_column(String(8), nullable=False)
+    category_order: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    course_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("document_chunks.id")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(64))
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    rules: Mapped[list["DegreeRuleRow"]] = relationship(
+        back_populates="rule_set", cascade="all, delete-orphan", order_by="DegreeRuleRow.ordinal"
+    )
+    courses: Mapped[list["DegreeRuleCourse"]] = relationship(
+        back_populates="rule_set",
+        cascade="all, delete-orphan",
+        order_by="DegreeRuleCourse.ordinal",
+    )
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type",
+            "source_key",
+            "major",
+            "rule_version",
+            "content_hash",
+            name="uq_rule_set_source_content",
+        ),
+        Index("ix_rule_sets_source", "source_type", "source_key"),
+        Index("ix_rule_sets_major", "major", "admission_year"),
+    )
+
+
+class DegreeRuleRow(Base):
+    """某一课程类别的最低学分与必修课程；字段对应 PRODUCT_SPEC 5.2 ``DegreeRule``。"""
+
+    __tablename__ = "degree_rules"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    rule_set_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("academic_rule_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    major: Mapped[str] = mapped_column(String(128), nullable=False)
+    admission_year: Mapped[int] = mapped_column(Integer, nullable=False)
+    rule_version: Mapped[str] = mapped_column(String(32), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    minimum_credits: Mapped[str] = mapped_column(String(8), nullable=False)
+    required_course_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
+    effective_from: Mapped[str | None] = mapped_column(String(32))
+    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("document_chunks.id")
+    )
+
+    rule_set: Mapped[AcademicRuleSet] = relationship(back_populates="rules")
+
+    __table_args__ = (
+        UniqueConstraint("rule_set_id", "category", name="uq_degree_rule_category"),
+        Index("ix_degree_rules_set", "rule_set_id"),
+    )
+
+
+class DegreeRuleCourse(Base):
+    """规则课程目录：课程代码 → 名称 / 学分 / 类别的规范化映射。"""
+
+    __tablename__ = "degree_rule_courses"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    rule_set_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("academic_rule_sets.id", ondelete="CASCADE"), nullable=False
+    )
+    ordinal: Mapped[int] = mapped_column(Integer, nullable=False)
+    course_code: Mapped[str] = mapped_column(String(64), nullable=False)
+    course_name: Mapped[str] = mapped_column(String(200), nullable=False)
+    credits: Mapped[str] = mapped_column(String(8), nullable=False)
+    category: Mapped[str] = mapped_column(String(64), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_chunk_id: Mapped[str | None] = mapped_column(
+        String(64), ForeignKey("document_chunks.id")
+    )
+
+    rule_set: Mapped[AcademicRuleSet] = relationship(back_populates="courses")
+
+    __table_args__ = (
+        UniqueConstraint("rule_set_id", "course_code", name="uq_rule_course_code"),
+        Index("ix_rule_courses_set", "rule_set_id"),
+    )
+
+
+class AcademicProjection(Base):
+    """演示资料的投影幂等记录：``(source_type, source_key, dataset_version)`` 唯一。
+
+    同一来源同一数据集版本只投影一次；重复 seed 只补齐缺失投影，不重复插入。
+    """
+
+    __tablename__ = "academic_projections"
+
+    id: Mapped[str] = mapped_column(String(36), primary_key=True, default=new_uuid)
+    source_type: Mapped[str] = mapped_column(String(16), nullable=False)
+    source_key: Mapped[str] = mapped_column(String(640), nullable=False)
+    dataset_version: Mapped[str] = mapped_column(String(64), nullable=False)
+    projection_fingerprint: Mapped[str] = mapped_column(String(64), nullable=False)
+    record_set_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("academic_record_sets.id", ondelete="SET NULL")
+    )
+    rule_set_id: Mapped[str | None] = mapped_column(
+        String(36), ForeignKey("academic_rule_sets.id", ondelete="SET NULL")
+    )
+    status: Mapped[str] = mapped_column(String(32), nullable=False, default=constants.STATUS_QUEUED)
+    created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_type", "source_key", "dataset_version", name="uq_academic_projection_source"
+        ),
+    )
+
