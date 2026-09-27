@@ -64,8 +64,10 @@
 
 ### 本轮验收
 
-- 新增 `tests/test_academic_engine.py`（49 项）与 `tests/test_academic_models.py`（8 项），覆盖计分规则、重修 / 在修 / 重复记录、类别优先级、missing、缺口钳制、Decimal 精度、确定性、非法输入、投影纯函数、隔离性守卫，以及新表创建、增量迁移、唯一约束、级联、外键、精确小数往返与重启恢复。
-- `docker compose exec backend pytest` → **519 passed**；生成器 `--network none` → 72 passed；前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`（`degraded`、`planning=unavailable`）均符合预期。
+- 新增 `tests/test_academic_engine.py`（确定性引擎与投影纯函数）与 `tests/test_academic_models.py`（持久化与增量建表），共 **+49** 项用例：计分规则、重修 / 在修 / 重复记录、类别优先级、missing、缺口钳制、Decimal 精度、确定性、非法输入、投影纯函数、隔离性守卫，以及新表创建、增量迁移、唯一约束、级联、外键、精确小数往返与重启恢复。
+- `docker compose exec backend pytest` → **519 passed**（阶段 6 为 470）；生成器 `--network none` → 72 passed；前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`（`degraded`、`planning=unavailable`）均符合预期。
+- 在**真实运行数据卷**上执行 `init_database` 验证：6 张新表已增量创建，`documents` / `document_chunks` / `demo_active_dataset` / `document_pipeline_state` 等既有表全部保留。
+- 提交内容扫描：8 个文件，无 `.env` / 数据库 / uploads / 日志 / 模型 / 缓存 / `__pycache__` / `dist`。
 - 未调用任何真实 API、未下载或加载模型、未启动 GPU Profile；默认镜像仍无 torch / sentence-transformers。
 
 ## 阶段 6 结论（SSE 问答与引用）
