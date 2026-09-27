@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from app import constants
 from app.academic.projection import (
     ACADEMIC_PROJECTION_VERSION,
     RecordDraft,
@@ -51,8 +52,8 @@ from app.models import (
 logger = logging.getLogger("app.academic")
 
 DEMO_SOURCE_TYPE = "demo"
-RECORD_DOC_CATEGORY = "course_records"
-RULE_DOC_CATEGORY = "degree_plan"
+RECORD_DOC_CATEGORY = constants.DOC_CATEGORY_COURSE_RECORDS
+RULE_DOC_CATEGORY = constants.DOC_CATEGORY_DEGREE_PLAN
 DOCUMENT_READY = "ready"
 PROJECTION_READY = "ready"
 # 集合的激活状态：只有当前 active dataset 的 demo 集合为 active，其它 demo 版本一律 inactive

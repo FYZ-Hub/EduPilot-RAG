@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 7 进行中（7A 与 7B-1 已完成，下一步 7B-2）**
-- 下一阶段：**阶段 7B-2 — records/rules 导入接口与 GET /api/academic/options**，随后 7C — 规划 API 与全量验收
+- 当前阶段：**阶段 7 进行中（7A、7B-1、7B-2 已完成，下一步 7C）**
+- 下一阶段：**阶段 7C — `POST /api/academic/plan` 与全量验收**（health `planning` 仍为 `unavailable`）
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -117,6 +117,105 @@
 - **BUG-7B-05（demo 学业集合缺少 active / inactive 状态）**：投影落库时未写 `activation_state`，也没有退役旧 demo 版本，同一来源可能同时存在多个「可用」集合。现在投影落库与状态对账处于**同一事务**：唯一 active dataset 的 demo record / rule set 写为 `active`，其它 demo 版本统一为 `inactive`，`upload` 来源完全不参与；旧集合只退役**不删除**，不静默选择某个 rule set，且即使本次 seed 全部 `skipped` 也会执行状态对账。
 - 两个缺陷均先补**修复前失败测试**（各 4 项失败、退出码 1）再修复，修复后定向与全量测试退出码 0。
 - **测试编辑更正（非产品缺陷）**：新增迁移测试最初的期望表把 `record_set_id: CASCADE` 也套用到 `academic_projections`，而模型对投影的定义是 `ON DELETE SET NULL`；已改为按表声明期望值，并在修复前重新采集失败证据。
+
+### 阶段 7B-2 结论（学业资料导入接口与可选上下文）
+
+阶段 7 仍为 `in_progress`（7A、7B-1、7B-2 已完成，下一步 **7C**）。本轮只完成
+`POST /api/academic/records/import`、`POST /api/academic/rules/import` 与
+`GET /api/academic/options`；**未实现** `POST /api/academic/plan`，`/api/health` 的
+`planning` 仍为 `unavailable`（未改动），也未开始阶段 8。
+
+**接口契约**
+
+- 两个导入接口固定 `multipart/form-data`（`file` 必填、`name` 可选），成功响应严格为
+  `{"id": uuid, "status": "ready", "warnings": [...]}`，不含 `source_key`、路径、哈希、
+  身份字段或内部诊断；记录只接受 XLSX，规则接受 PDF / DOCX / XLSX。
+- `name` 经 `validate_display_name` + `safe_display_name` 双重处理（长度、控制字符、
+  路径分隔符、伪装路径、保留设备名一律拒绝）；未提供时只用**安全文件名**或真实提取到的
+  专业与版本生成显示名。
+- 所有后端生成的 4xx/5xx 仍是统一错误体 `{code, message, details, request_id}`，
+  新增稳定错误码：`ACADEMIC_FILE_TYPE_UNSUPPORTED`、`ACADEMIC_PARSE_FAILED`、
+  `ACADEMIC_FIELD_MISSING`、`ACADEMIC_VALUE_INVALID`、`ACADEMIC_RULE_CONFLICT`、
+  `ACADEMIC_SOURCE_UNAVAILABLE`、`ACADEMIC_PERSIST_FAILED`。
+
+**安全与解析复用（不新写弱化版校验器）**
+
+- 文件安全校验、临时落盘、原子提交与清理全部复用阶段 2B 的正式组件
+  （`app.documents.upload` / `app.documents.container`）：原始 `Content-Disposition`
+  文件名、扩展名、声明 MIME、文件头、OOXML 容器、`[Content_Types].xml`、ZIP 条目路径、
+  压缩炸弹、宏与嵌入对象、外部引用。
+- 解析复用 `app.documents.parsing.parse_document`；业务字段**只**从解析出的块（表格结构）
+  提取，绝不从 `DocumentChunk` 正文提取。培养方案同时支持**段落形态**（PDF / DOCX：
+  `专业名称：…`、`· 专业必修：58.0 学分`、`QM-CS102 高等数学（一） 5.0 公共必修 …`）与
+  **表格形态**（XLSX：`课程类别: 专业必修；最低学分: 58.0`、
+  `课程代码: QM-CS101；课程名称: …；学分: 4.0；课程类别: 专业必修`）。
+- 缺字段、非法学分 / 状态、未知类别、重复但取值不同的类别或课程代码一律**明确失败**；
+  只有「完全相同的重复声明 / 重复目录行」才降级为稳定 warning
+  （`DUPLICATE_CATEGORY_DECLARATION` / `DUPLICATE_CATALOG_ENTRY`）。不使用 LLM、文件名、
+  manifest、`ground_truth`、`facts.py` 或任何硬编码补齐字段。
+
+**事务、幂等与并发**
+
+- 顺序固定为：安全校验 → 解析与投影（全部通过）→ 提交文件 → **单个事务**写入
+  Document / DocumentBlock / 集合与子项。任一环节失败都不产生可见集合、不留下部分子项，
+  也不留下孤立文件（临时文件丢弃，已提交文件回滚时删除）。
+- 幂等以**内容**为准（upload 来源空间 + 文件 SHA-256 + 与显示名无关的内容指纹）：
+  同内容重复导入返回同一集合、同一 ID，不新增 Document / record set / course records；
+  `name` 只影响首次导入的显示名，**改显示名不能绕过内容幂等**。
+- 并发相同导入由 `academic_record_sets` / `academic_rule_sets` 的唯一约束兜底：
+  失败事务先 `rollback`，再按内容重新读取既有合法结果并返回同一 ID（有双线程实测）。
+
+**来源与 RAG 隔离**
+
+- 导入建立真实 `Document` 与 `DocumentBlock`；`source_doc_id` 指向真实文档。
+  学业导入不建立切片，因此 `source_chunk_id` 一律为 `NULL`（**不伪造** chunk_id）。
+- 导入文档 `retrievable=false`、`status=queued`、`current_stage=null`、
+  `activation_state=null`，不写任何向量 / FTS 完成标记，也不污染 active demo dataset；
+  上传 worker 与通用上传去重都显式跳过学业类别（`course_records` / `degree_plan`），
+  因此导入不会让文档进入 RAG 检索语料。
+- 来源文档被删除后，集合本身保留（沿用已验证的 CASCADE / SET NULL 语义），
+  但不会再出现在 options 中。
+
+**`GET /api/academic/options`（严格对齐 PRODUCT_SPEC 6.4）**
+
+- 顶层只有 `record_sets` 与 `rule_sets`；子项字段不得增删，`updated_at` 为规范 UTC ISO-8601。
+- demo 选项必须同时满足 `source_type=demo`、`dataset_version` 等于**唯一** active 指针、
+  `activation_state=active`、`status=ready`、来源文档仍有效；inactive / candidate / 旧版本
+  demo 一律不返回。upload 选项只要求 `status=ready` 且来源文档有效，**不依赖** demo 指针，
+  因此 demo 切换不影响 upload。
+- 数组去重并稳定排序（record_sets 按 name / updated_at / id，rule_sets 按 major /
+  admission_year / rule_version / id）；无数据返回两个空数组；不返回默认选中项，
+  后端不静默选择规则版本，也不泄露 `source_key` / `activation_state` / `dataset_version`。
+
+**BUG-7B2-01（本轮开发中发现并修复）**
+
+- 现象：首次实现把「Document + DocumentBlock + 集合与子项」放进同一次 flush，全部导入
+  返回 `ACADEMIC_PERSIST_FAILED`；实测该次 flush 只发出
+  `INSERT INTO academic_record_sets`，`documents` 尚未插入，触发
+  `FOREIGN KEY constraint failed`。最小复现显示同一 flush 中 `academic_record_sets`
+  先于 `documents` 执行，且与注册顺序无关。
+- 根因：跨 mapper 的插入顺序不能依赖 unit of work 自行推断（`AcademicRecordSet` 与
+  `Document` 之间没有 relationship 边）。
+- 修复：`app/academic/imports.py::_persist_import` 在加入父文档后先 `session.flush()`
+  落 `Document`，再写块与集合 —— 与既有 `documents/service.register_upload` 的写法一致。
+- 证据：修复前 `pytest tests/test_academic_imports.py tests/test_academic_options.py -q`
+  → **33 failed / 26 passed，退出码 1**；修复后同一命令全部通过（退出码 0），
+  最终两个文件共 **61** 项。
+
+**本轮验收**
+
+- 新增 `tests/test_academic_imports.py`（51 项）与 `tests/test_academic_options.py`（10 项），
+  合计 **+61**：PDF / DOCX / XLSX 三种格式的真实解析导入、响应契约、危险文件名、
+  MIME / 扩展名 / 签名不一致、ZIP 穿越 / 宏 / 压缩炸弹、超大文件、缺表头、非法状态与学分、
+  重复与冲突规则、幂等（同内容 / 换 name）、双线程并发、失败零残留、来源真实性与同文档、
+  RAG 隔离、身份列不外泄、options 全量口径与字段严格性、错误体 `request_id`、以及
+  阶段 1—7B-1 的全量回归。
+- `docker compose exec backend pytest -q` → **620 passed**（7B-1 收尾修复轮为 559）；
+  前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`
+  均符合预期；真实 HTTP 冒烟：`GET /api/academic/options` → `{"record_sets":[],"rule_sets":[]}`、
+  `GET /api/health` → `degraded`/`planning=unavailable`、非法文件导入 → 400 + 非空 `request_id`。
+- 未调用任何真实 API、未使用 LLM 参与解析或计算、未下载或加载模型、未启动 GPU Profile；
+  未向真实开发数据卷写入学业数据（迁移后 6 张学业表仍为 0 行，`PRAGMA foreign_key_check` 为空）。
 
 ### 阶段 7A 修复轮（契约与冲突 warning）
 

@@ -11,6 +11,12 @@ SOURCE_DEMO = "demo"
 SOURCE_UPLOAD = "upload"
 SOURCE_TYPES = (SOURCE_DEMO, SOURCE_UPLOAD)
 
+# 学业导入文档使用的类别（与 demo 学业资料同名）：
+# 它们只作为学业证据来源，不属于 RAG 检索语料，因此上传 worker 与上传去重都跳过它们。
+DOC_CATEGORY_COURSE_RECORDS = "course_records"
+DOC_CATEGORY_DEGREE_PLAN = "degree_plan"
+ACADEMIC_DOC_CATEGORIES = (DOC_CATEGORY_COURSE_RECORDS, DOC_CATEGORY_DEGREE_PLAN)
+
 # 支持的文档格式
 FILE_TYPE_PDF = "pdf"
 FILE_TYPE_DOCX = "docx"

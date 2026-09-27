@@ -32,6 +32,7 @@ from app.academic.types import (
     credit_text,
     to_credit,
 )
+from app.core.errors import ACADEMIC_RULE_CONFLICT, ACADEMIC_VALUE_INVALID
 from app.core.hashing import stable_digest
 from app.core.privacy import scrub
 
@@ -134,6 +135,15 @@ RECORD_REQUIRED_LABELS = ("课程代码", "课程名称", "学分", "课程类�
 # 培养方案必需字段的标签
 RULE_REQUIRED_LABELS = ("专业名称", "招生年份", "文档版本", "生效日期")
 
+# 表格形态的培养方案：表头名 → 语义（PDF/DOCX 段落形态与 XLSX 表格形态共用同一套提取）
+RULE_TABLE_CATEGORY_LABELS = ("课程类别", "类别")
+RULE_TABLE_MINIMUM_LABELS = ("最低学分", "最低毕业学分", "最低修读学分", "学分")
+RULE_TABLE_CATALOG_LABELS = ("课程代码", "课程名称", "学分")
+
+# 导入时「可容忍的重复」对应的稳定 warning 码（冲突则直接失败，不降级为 warning）
+IMPORT_WARN_DUPLICATE_CATEGORY = "DUPLICATE_CATEGORY_DECLARATION"
+IMPORT_WARN_DUPLICATE_CATALOG = "DUPLICATE_CATALOG_ENTRY"
+
 _COURSE_CODE_RE = re.compile(r"^[A-Za-z]{2,5}-[A-Za-z]{2,5}\d{2,5}$")
 _NUMERIC_RE = re.compile(r"^\d+(?:\.\d+)?$")
 _TOTAL_CREDITS_RE = re.compile(r"毕业总学分[：:]\s*(?P<credits>\d+(?:\.\d+)?)\s*学分")
@@ -180,6 +190,8 @@ class RuleSetDraft:
     header_block_index: int
     category_blocks: tuple[tuple[str, int], ...] = ()
     course_blocks: tuple[tuple[str, int], ...] = ()
+    # 稳定 warning：可容忍的重复（identical duplicate）在此累积，冲突仍然直接失败
+    warnings: tuple[str, ...] = ()
 
 
 def labelled_pairs(text: str) -> dict[str, str]:
@@ -250,7 +262,7 @@ def project_record_rows(blocks: Sequence[SourceBlockView]) -> tuple[RecordDraft,
         raw_status = pairs["状态"]
         status = DEFAULT_STATUS_ALIASES.get(raw_status, raw_status)
         if status not in COURSE_STATUSES:
-            raise AcademicDataError(f"unknown course status: {raw_status!r}")
+            raise AcademicDataError(f"unknown course status: {raw_status!r}", ACADEMIC_VALUE_INVALID)
         drafts.append(
             RecordDraft(
                 record=CourseRecord(
@@ -277,7 +289,18 @@ def project_record_rows(blocks: Sequence[SourceBlockView]) -> tuple[RecordDraft,
 def project_rule_set_blocks(
     blocks: Sequence[SourceBlockView], *, doc_id: str
 ) -> RuleSetDraft:
-    """从培养方案的 heading / paragraph 块提取规则与课程目录。"""
+    """从培养方案的块中提取规则与课程目录。
+
+    同一套提取逻辑同时支持两种真实形态：
+
+    - **段落形态**（PDF / DOCX）：``专业名称：…``、``· 专业必修：58.0 学分``、
+      ``QM-CS102 高等数学（一） 5.0 公共必修 第1学期 无``；
+    - **表格形态**（XLSX）：行文本由 ``表头: 取值``（``；`` 分隔）组成，
+      例如 ``课程类别: 专业必修；最低学分: 58.0`` 与
+      ``课程代码: QM-CS101；课程名称: 程序设计基础；学分: 4.0；课程类别: 专业必修``。
+
+    业务字段只来自 ``DocumentBlock``；缺字段、非法取值与相互矛盾一律明确失败，不猜测默认值。
+    """
     labels: dict[str, str] = {}
     label_blocks: dict[str, int] = {}
     for block in blocks:
@@ -300,26 +323,58 @@ def project_rule_set_blocks(
     minimums: list[tuple[str, str, int]] = []
     catalog: list[tuple[str, str, str, str, int]] = []
     categories_seen: list[str] = []
+    declared_minimums: dict[str, str] = {}
+    warnings: list[str] = []
 
     for block in blocks:
-        if block.block_type not in ("heading", "paragraph"):
-            continue
         text = (block.text or "").strip()
+        pairs = labelled_pairs(text)
+
         if required_credits is None:
             total = _TOTAL_CREDITS_RE.search(text)
             if total:
                 required_credits = total.group("credits")
                 required_credits_block = block.block_index
-        minimum = _CATEGORY_MINIMUM_RE.match(text)
-        if minimum and minimum.group("category") != _TOTAL_CREDITS_LABEL:
-            category = minimum.group("category")
-            if category not in categories_seen:
-                categories_seen.append(category)
-                minimums.append((category, minimum.group("credits"), block.block_index))
+            else:
+                declared_total = _leading_number(pairs.get(_TOTAL_CREDITS_LABEL, ""))
+                if declared_total is not None:
+                    required_credits = declared_total
+                    required_credits_block = block.block_index
+
         entry = _parse_catalog_line(text, categories_seen)
+        if entry is None:
+            entry = _table_catalog_entry(pairs)
         if entry is not None:
             code, name, credits, category = entry
             catalog.append((code, name, credits, category, block.block_index))
+            continue
+
+        declaration: tuple[str, str, int] | None = None
+        table_declaration = _table_category_declaration(pairs)
+        if table_declaration is not None:
+            declaration = (table_declaration[0], table_declaration[1], block.block_index)
+        else:
+            minimum = _CATEGORY_MINIMUM_RE.match(text)
+            if minimum and minimum.group("category") != _TOTAL_CREDITS_LABEL:
+                declaration = (
+                    minimum.group("category"),
+                    minimum.group("credits"),
+                    block.block_index,
+                )
+        if declaration is not None:
+            category, credits, declared_block = declaration
+            previous = declared_minimums.get(category)
+            if previous is None:
+                declared_minimums[category] = credits
+                categories_seen.append(category)
+                minimums.append((category, credits, declared_block))
+            elif to_credit(previous) == to_credit(credits):
+                # 完全相同的重复声明可以容忍，但必须形成稳定 warning
+                warnings.append(IMPORT_WARN_DUPLICATE_CATEGORY)
+            else:
+                raise AcademicDataError(
+                    f"conflicting category minimum: {category}", ACADEMIC_RULE_CONFLICT
+                )
 
     if required_credits is None or required_credits_block is None:
         raise AcademicDataError("missing 毕业总学分 in the plan document")
@@ -331,15 +386,17 @@ def project_rule_set_blocks(
     catalog_by_code: dict[str, tuple[str, str, str, int]] = {}
     for code, name, credits, category, block_index in catalog:
         if category not in categories_seen:
-            raise AcademicDataError(f"catalog category not declared: {category!r}")
+            raise AcademicDataError(
+                f"catalog category not declared: {category!r}", ACADEMIC_RULE_CONFLICT
+            )
         existing = catalog_by_code.get(code)
-        if existing is not None and (existing[0], existing[1], existing[2]) != (
-            name,
-            credits,
-            category,
-        ):
-            raise AcademicDataError(f"conflicting catalog entry: {code}")
-        catalog_by_code.setdefault(code, (name, credits, category, block_index))
+        if existing is None:
+            catalog_by_code[code] = (name, credits, category, block_index)
+        elif (existing[0], existing[1], existing[2]) == (name, credits, category):
+            # 同一课程代码的完全相同重复行可以容忍，但必须形成稳定 warning
+            warnings.append(IMPORT_WARN_DUPLICATE_CATALOG)
+        else:
+            raise AcademicDataError(f"conflicting catalog entry: {code}", ACADEMIC_RULE_CONFLICT)
 
     required_by_category: dict[str, list[str]] = {category: [] for category in categories_seen}
     for code, (name, credits, category, _block_index) in sorted(catalog_by_code.items()):
@@ -388,13 +445,52 @@ def project_rule_set_blocks(
         course_blocks=tuple(
             (code, entry[3]) for code, entry in sorted(catalog_by_code.items())
         ),
+        warnings=tuple(sorted(set(warnings))),
     )
+
+
+def _leading_number(value: str) -> str | None:
+    """取文本开头的数字（``160.0 学分`` → ``160.0``）；没有数字则返回 None。"""
+    match = re.match(r"\s*(\d+(?:\.\d+)?)", value or "")
+    return match.group(1) if match else None
+
+
+def _table_catalog_entry(pairs: Mapping[str, str]) -> tuple[str, str, str, str] | None:
+    """表格形态的课程目录行；字段不全时返回 None（不猜测默认值）。"""
+    if not all(label in pairs for label in RULE_TABLE_CATALOG_LABELS):
+        return None
+    category = next(
+        (pairs[label] for label in RULE_TABLE_CATEGORY_LABELS if label in pairs), None
+    )
+    if category is None:
+        return None
+    code = pairs["课程代码"].strip()
+    name = pairs["课程名称"].strip()
+    credits = pairs["学分"].strip()
+    if not code or not name or not credits:
+        return None
+    return code, name, credits, category.strip()
+
+
+def _table_category_declaration(pairs: Mapping[str, str]) -> tuple[str, str] | None:
+    """表格形态的类别最低学分行；缺少类别或学分列时返回 None。"""
+    category = next(
+        (pairs[label] for label in RULE_TABLE_CATEGORY_LABELS if label in pairs), None
+    )
+    if category is None:
+        return None
+    declared = next((pairs[label] for label in RULE_TABLE_MINIMUM_LABELS if label in pairs), None)
+    number = _leading_number(declared or "")
+    category = category.strip()
+    if number is None or not category or category == _TOTAL_CREDITS_LABEL:
+        return None
+    return category, number
 
 
 def _parse_year(value: str) -> int:
     match = re.search(r"(\d{4})", value or "")
     if not match:
-        raise AcademicDataError(f"invalid admission year: {value!r}")
+        raise AcademicDataError(f"invalid admission year: {value!r}", ACADEMIC_VALUE_INVALID)
     return int(match.group(1))
 
 
@@ -465,7 +561,7 @@ def project_course_records(
         raw_status = _cell(row, "status")
         status = statuses.get(raw_status, raw_status)
         if status not in COURSE_STATUSES:
-            raise AcademicDataError(f"unknown course status: {raw_status!r}")
+            raise AcademicDataError(f"unknown course status: {raw_status!r}", ACADEMIC_VALUE_INVALID)
         records.append(
             CourseRecord(
                 course_code=code,
@@ -501,12 +597,14 @@ def build_rule_set(
     if not rule_set_id or not major or not rule_version:
         raise AcademicDataError("rule set identity must not be empty")
     if not isinstance(admission_year, int) or isinstance(admission_year, bool):
-        raise AcademicDataError("admission_year must be an integer")
+        raise AcademicDataError("admission_year must be an integer", ACADEMIC_VALUE_INVALID)
 
     seen_categories: set[str] = set()
     for declaration in categories:
         if declaration.category in seen_categories:
-            raise AcademicDataError(f"duplicate rule category: {declaration.category}")
+            raise AcademicDataError(
+                f"duplicate rule category: {declaration.category}", ACADEMIC_RULE_CONFLICT
+            )
         seen_categories.add(declaration.category)
         to_credit(declaration.minimum_credits)
 
@@ -518,7 +616,9 @@ def build_rule_set(
             course.credits,
             course.category,
         ):
-            raise AcademicDataError(f"conflicting rule course: {course.course_code}")
+            raise AcademicDataError(
+                f"conflicting rule course: {course.course_code}", ACADEMIC_RULE_CONFLICT
+            )
         catalog.setdefault(course.course_code, course)
 
     return DegreeRuleSet(
@@ -565,14 +665,32 @@ def record_set_fingerprint(records: Sequence[CourseRecord], display_name: str) -
     return projection_fingerprint(parts)
 
 
+def record_content_fingerprint(records: Sequence[CourseRecord]) -> str:
+    """**与显示名无关**的课程记录内容指纹。
+
+    导入幂等必须以内容为准：改显示名（``name`` 字段）不得绕过重复判定，
+    因此这里刻意不把 ``display_name`` 计入指纹。
+    """
+    parts = [
+        f"{item.course_code}:{item.status}:{credit_text(item.credits)}:{item.category}:{item.semester or ''}"
+        for item in records
+    ]
+    return projection_fingerprint(parts)
+
+
 __all__ = [
     "ACADEMIC_PROJECTION_VERSION",
     "BLOCK_TABLE_HEADER",
     "BLOCK_TABLE_ROW",
     "DEFAULT_COLUMN_ALIASES",
     "DEFAULT_STATUS_ALIASES",
+    "IMPORT_WARN_DUPLICATE_CATALOG",
+    "IMPORT_WARN_DUPLICATE_CATEGORY",
     "RECORD_REQUIRED_LABELS",
     "RULE_REQUIRED_LABELS",
+    "RULE_TABLE_CATALOG_LABELS",
+    "RULE_TABLE_CATEGORY_LABELS",
+    "RULE_TABLE_MINIMUM_LABELS",
     "TABLE_BLOCK_TYPES",
     "RecordDraft",
     "RecordSetProjection",
@@ -586,6 +704,7 @@ __all__ = [
     "project_record_rows",
     "project_rule_set_blocks",
     "projection_fingerprint",
+    "record_content_fingerprint",
     "record_set_display_name",
     "record_set_fingerprint",
     "rule_set_display_name",

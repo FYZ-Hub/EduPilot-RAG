@@ -15,6 +15,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
 
+from app.api.academic import router as academic_router
 from app.api.chat import router as chat_router
 from app.api.demo import router as demo_router
 from app.api.deps import AppContext
@@ -150,6 +151,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     application.include_router(demo_router, prefix="/api")
     application.include_router(retrieval_router, prefix="/api")
     application.include_router(chat_router, prefix="/api")
+    # 阶段 7B-2：学业资料导入与可选上下文（不含 plan API）
+    application.include_router(academic_router, prefix="/api")
     return application
 
 

@@ -348,6 +348,8 @@ def find_existing_upload(session: Session, sha256: str) -> Document | None:
             Document.source_type == constants.SOURCE_UPLOAD,
             Document.sha256 == sha256,
             Document.deleted_at.is_(None),
+            # 学业导入文档是独立的证据来源，不能被通用上传接口复用
+            Document.doc_category.notin_(constants.ACADEMIC_DOC_CATEGORIES),
         )
         .order_by(Document.created_at.desc())
     )

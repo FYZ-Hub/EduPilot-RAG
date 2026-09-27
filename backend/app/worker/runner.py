@@ -1336,6 +1336,9 @@ class Worker:
                     Document.source_type == constants.SOURCE_UPLOAD,
                     Document.status == constants.STATUS_QUEUED,
                     Document.deleted_at.is_(None),
+                    # 学业导入文档只作为学业证据来源，不属于 RAG 检索语料：
+                    # worker 不认领它们，也不会为它们伪造向量 / FTS 完成状态
+                    Document.doc_category.notin_(constants.ACADEMIC_DOC_CATEGORIES),
                 )
                 .order_by(Document.created_at)
                 .limit(1)

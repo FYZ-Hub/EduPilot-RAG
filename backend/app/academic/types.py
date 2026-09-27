@@ -12,6 +12,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP, Decimal, InvalidOperation
 
+from app.core.errors import ACADEMIC_FIELD_MISSING, ACADEMIC_VALUE_INVALID
+
 # 对外固定一位小数；上限用于拒绝明显异常值（防注入式超大数字）
 CREDIT_QUANT = Decimal("0.1")
 MAX_CREDIT = Decimal("999.9")
@@ -35,23 +37,33 @@ WARN_REQUIRED_COURSE_UNKNOWN = "REQUIRED_COURSE_UNKNOWN"
 
 
 class AcademicDataError(ValueError):
-    """规范化数据非法；调用方必须返回稳定错误，不得猜测或静默修正。"""
+    """规范化数据非法；调用方必须返回稳定错误，不得猜测或静默修正。
+
+    ``code`` 是可直接映射为 HTTP 错误体的稳定错误码，默认「缺少必要字段」；
+    学分 / 状态非法与规则冲突在抛出点显式指定各自的错误码。
+    """
+
+    def __init__(self, message: str, code: str = ACADEMIC_FIELD_MISSING) -> None:
+        super().__init__(message)
+        self.code = code
 
 
 def to_credit(value: object) -> Decimal:
     """把外部取值转换为受限 ``Decimal``；非法值一律抛出 ``AcademicDataError``。"""
     if value is None or isinstance(value, bool):
-        raise AcademicDataError("credit must be a finite number")
+        raise AcademicDataError("credit must be a finite number", ACADEMIC_VALUE_INVALID)
     try:
         amount = Decimal(str(value).strip())
     except (InvalidOperation, ValueError, AttributeError, ArithmeticError) as error:
-        raise AcademicDataError("credit must be a finite number") from error
+        raise AcademicDataError(
+            "credit must be a finite number", ACADEMIC_VALUE_INVALID
+        ) from error
     if not amount.is_finite():
-        raise AcademicDataError("credit must be finite")
+        raise AcademicDataError("credit must be finite", ACADEMIC_VALUE_INVALID)
     if amount < 0:
-        raise AcademicDataError("credit must not be negative")
+        raise AcademicDataError("credit must not be negative", ACADEMIC_VALUE_INVALID)
     if amount > MAX_CREDIT:
-        raise AcademicDataError("credit out of range")
+        raise AcademicDataError("credit out of range", ACADEMIC_VALUE_INVALID)
     return amount
 
 
