@@ -89,7 +89,8 @@ class LocalReranker(RerankProvider):
                 max_length=self.descriptor.max_length,
                 trust_remote_code=False,
                 local_files_only=self.settings.rerank_local_files_only,
-                cache_folder=self.settings.model_cache_path,
+                # sentence-transformers 3.3.1 的 CrossEncoder 参数名为 cache_dir
+                cache_dir=self.settings.model_cache_path,
             )
         except ApiError:
             raise

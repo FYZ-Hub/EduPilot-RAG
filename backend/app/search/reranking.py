@@ -6,9 +6,11 @@
       → 取最多 ``RERANK_MAX_CANDIDATES``（20）条候选
       → Reranker 打分
       → 稳定排序（rerank_score 降序 → fused_score 降序 → chunk_id 升序）
-      → 输出前 ``RERANK_TOP_K``（6）条
+      → 输出前 ``RERANK_TOP_K``（6）条，且**永不**超过硬上限 ``RERANK_TOP_K_MAX``（6）条
 
 - 空候选**不调用** Provider；候选少于 ``rerank_top_k`` 时只返回实际数量。
+- 输出条数的唯一决定点是 ``resolve_rerank_limit``：显式 ``top_k`` 优先，
+  非正数（含 0 与负数）表示不要结果，超大值被硬上限截断。
 - Provider 只返回分数；引用字段始终直接来自原 ``RetrievedChunk``，不会与分数错位。
 - Reranker 明确不可用或 API 超时时安全降级：返回原 RRF 顺序的前 K 条，
   ``rerank_applied=false``、``rerank_score=null`` 并记录稳定 ``degraded_reason``；
@@ -19,8 +21,8 @@ from __future__ import annotations
 
 import math
 import re
-import time
 from collections.abc import Sequence
+from time import perf_counter
 
 from sqlalchemy.orm import Session
 
@@ -39,10 +41,28 @@ from app.vector.store import ChromaVectorStore
 
 # 固定、版本化的重排输入上限（PRODUCT_SPEC 7.2：重排前 12–20 条）
 RERANK_MAX_CANDIDATES = 20
+# 硬上限：无论配置或调用参数如何，输出都不得超过 6 条（PRODUCT_SPEC 7.2 前 4–6 条）
+RERANK_TOP_K_MAX = 6
 
 # 降级原因兜底值；正确性要求：不含任何敏感数据、跨运行稳定
 DEGRADED_RERANKER_UNAVAILABLE = "reranker_unavailable"
 _DEGRADED_REASON_RE = re.compile(r"^[a-z0-9_]{1,48}$")
+
+
+def resolve_rerank_limit(requested: int | None, configured: int) -> int:
+    """输出条数的唯一决定点。
+
+    稳定规则：显式 ``requested`` 优先于配置；非正数表示「不要结果」，返回 0；
+    任何情况下都不会超过硬上限 ``RERANK_TOP_K_MAX``。
+    """
+    raw = configured if requested is None else requested
+    try:
+        value = int(raw)
+    except (TypeError, ValueError):
+        value = RERANK_TOP_K_MAX
+    if value <= 0:
+        return 0
+    return min(value, RERANK_TOP_K_MAX)
 
 
 def validate_rerank_scores(scores: object, expected: int) -> list[float]:
@@ -97,14 +117,16 @@ class RerankingRetriever:
         filters: RetrievalFilters | None = None,
         top_k: int | None = None,
     ) -> tuple[list[RerankedResult], RerankDiagnostics]:
-        limit = max(1, int(top_k or self.settings.rerank_top_k))
-        started = time.perf_counter()
+        limit = resolve_rerank_limit(top_k, self.settings.rerank_top_k)
 
         hybrid = HybridRetriever(
             self.session, self.settings, self.vectors, self.embeddings, self.coordinator
         )
         hybrid_results, retrieval = hybrid.search(query, filters, top_k=RERANK_MAX_CANDIDATES)
         candidates = hybrid_results[:RERANK_MAX_CANDIDATES]
+
+        # 只统计 Reranker 阶段：Dense / FTS / RRF 的耗时保留在 RetrievalDiagnostics
+        rerank_started = perf_counter()
 
         def diagnostics(**overrides) -> RerankDiagnostics:
             descriptor = self.reranker.descriptor
@@ -116,13 +138,13 @@ class RerankingRetriever:
                 "reranker_fingerprint": descriptor.fingerprint,
                 "rerank_score_kind": descriptor.score_kind,
                 "rrf_version": RRF_VERSION,
-                "rerank_elapsed_ms": int((time.perf_counter() - started) * 1000),
+                "rerank_elapsed_ms": int((perf_counter() - rerank_started) * 1000),
             }
             values.update(overrides)
             return RerankDiagnostics(**values)
 
-        if not candidates:
-            # 空候选不调用 Provider
+        if not candidates or limit == 0:
+            # 空候选不调用 Provider；显式请求 0 条时也不调用
             return [], diagnostics(rerank_applied=False, reranked_candidates=0)
 
         texts = [item.chunk.text for item in candidates]
@@ -170,6 +192,8 @@ class RerankingRetriever:
 __all__ = [
     "DEGRADED_RERANKER_UNAVAILABLE",
     "RERANK_MAX_CANDIDATES",
+    "RERANK_TOP_K_MAX",
     "RerankingRetriever",
+    "resolve_rerank_limit",
     "validate_rerank_scores",
 ]

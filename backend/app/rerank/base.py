@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from app import constants
 from app.config import Settings
 from app.core.hashing import stable_digest
+from app.core.privacy import PRIVACY_POLICY_VERSION
 
 FAKE_RERANK_MODEL_NAME = "campus-rag-fake-reranker"
 FAKE_RERANK_REVISION = "1.0.0"
@@ -39,7 +40,11 @@ RERANK_MAX_LENGTH = 1024
 
 @dataclass(frozen=True)
 class RerankDescriptor:
-    """Reranker 身份与分数语义；``fingerprint`` 用于安全诊断。"""
+    """Reranker 身份与分数语义；``fingerprint`` 仅用于安全诊断。
+
+    ``privacy_policy_version`` 记录外发前的个人信息清洗策略版本。
+    该指纹**绝不进入** ``pipeline_fingerprint``，因此改动它不会触发任何文档重建。
+    """
 
     provider: str
     model: str
@@ -47,6 +52,7 @@ class RerankDescriptor:
     implementation_version: str
     score_kind: str
     max_length: int
+    privacy_policy_version: str = PRIVACY_POLICY_VERSION
 
     def as_dict(self) -> dict[str, object]:
         return {
@@ -56,6 +62,7 @@ class RerankDescriptor:
             "implementation_version": self.implementation_version,
             "score_kind": self.score_kind,
             "max_length": self.max_length,
+            "privacy_policy_version": self.privacy_policy_version,
         }
 
     @property

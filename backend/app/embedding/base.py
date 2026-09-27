@@ -14,6 +14,7 @@ from dataclasses import dataclass
 from app import constants
 from app.config import Settings
 from app.core.hashing import stable_digest
+from app.core.privacy import PRIVACY_POLICY_VERSION
 
 FAKE_MODEL_NAME = "campus-rag-fake-embedding"
 FAKE_REVISION = "1.0.0"
@@ -24,20 +25,29 @@ API_REVISION = "api"
 
 @dataclass(frozen=True)
 class EmbeddingDescriptor:
-    """Embedding 身份；``fingerprint`` 同时用作 ``embedding_fingerprint``。"""
+    """Embedding 身份；``fingerprint`` 同时用作 ``embedding_fingerprint``。
+
+    ``privacy_policy_version`` 只对**外部 API** Provider 有值：外发前的个人信息
+    清洗会改变向量语义，因此策略版本必须参与指纹，切换版本即触发 API 索引重建。
+    值为 ``None`` 时**不进入** ``as_dict()``，Local / Fake 的指纹不会受影响。
+    """
 
     provider: str
     model: str
     revision: str
     dimension: int
+    privacy_policy_version: str | None = None
 
     def as_dict(self) -> dict[str, object]:
-        return {
+        payload: dict[str, object] = {
             "provider": self.provider,
             "model": self.model,
             "revision": self.revision,
             "dimension": self.dimension,
         }
+        if self.privacy_policy_version is not None:
+            payload["privacy_policy_version"] = self.privacy_policy_version
+        return payload
 
     @property
     def fingerprint(self) -> str:
@@ -70,6 +80,8 @@ def descriptor_for(settings: Settings) -> EmbeddingDescriptor:
         model=settings.embedding_model,
         revision=settings.embedding_revision or API_REVISION,
         dimension=settings.embedding_dimension,
+        # 只有外部 Provider 会发送文本，因此只有它绑定清洗策略版本
+        privacy_policy_version=PRIVACY_POLICY_VERSION,
     )
 
 

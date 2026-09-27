@@ -86,6 +86,23 @@
 - **资源保护**：默认 backend 镜像**未**新增 torch / sentence-transformers（镜像内 `find_spec` 均为 `None`），镜像内**没有**模型权重、`/app/data`、`/app/models`，也**没有**产生 Hugging Face 缓存（`/root/.cache` 不存在）；本轮**未下载任何模型权重、未运行真实模型、未启动 GPU Profile**。`./data/models` 仍为空。
 - **边界**：阶段 5 只实现 Reranker 与查询时重排层，不含 Chat / SSE、LLM 调用、问题改写、答案生成、引用流、学分计算、前端业务页面与阶段 9 评测；未新增规范外的公共搜索或调试 API。**代码路径与 mock 已验证，但真实权重未下载、真实 Local 模型未运行**，因此默认 Local 环境的 `reranker.ready` 仍为 `false`。
 
+## 阶段 5 修复（本地 Reranker 兼容性与外部模型隐私边界）
+
+阶段 5 仍为 `completed`；本小节只记录对阶段 5 的独立加固修复，**未开始阶段 6**。
+
+- 输出：`backend/app/core/privacy.py`（外部模型隐私清洗，新增）、`backend/app/rerank/{local,api,base}.py`、`backend/app/embedding/{api,base}.py`、`backend/app/search/reranking.py`、`backend/tests/test_stage5_fixes.py`、`backend/tests/test_rerank_provider.py`（严格签名 Stub）。
+- **BUG-5-01（CrossEncoder 兼容性）**：锁定的 `sentence-transformers==3.3.1` 中 `CrossEncoder.__init__` 的真实参数名是 **`cache_dir`**（已核对官方 v3.3.1 源码），而实现此前传的是 `cache_folder`，会抛 `TypeError: got an unexpected keyword argument 'cache_folder'` 并导致本地重排 100% 加载失败。已改为 `cache_dir=MODEL_CACHE_PATH`，`revision` / `local_files_only=true` / `trust_remote_code=false` / `device` / `max_length` 全部保留。**不升级依赖来迁就错误参数**；测试改用**严格复刻 3.3.1 签名的 Stub（不使用 `**kwargs`）**，任何拼错的关键字都会直接失败而不是被吞掉。
+- **BUG-5-02（外部模型隐私边界）**：此前 API Reranker 与 API Embedding 会把 query / 候选文本**原样**发送给外部服务。新增确定性的 `app/core/privacy.py`：只清洗**外发副本**，绝不修改 `RetrievedChunk` / `citation` / `quote` / SQLite / Chroma / FTS。
+- **清洗规则与版本**：`PRIVACY_POLICY_VERSION = "external-privacy-v1"`；覆盖带「姓名 / 学生姓名 / 真实姓名」标签的姓名 → `[REDACTED_NAME]`、带「学号 / 学生编号 / 学籍号 / 学生证号 / 个人编号 / 人员编号」标签的个人编号 → `[REDACTED_STUDENT_ID]`、邮箱 → `[REDACTED_EMAIL]`、中国大陆手机号 → `[REDACTED_PHONE]`、15/18 位身份证格式 → `[REDACTED_ID]`。完全确定性、**幂等**、离线、不调用模型；课程代码（如 `QM-CS201`）等非个人信息不会被误清洗；日志不记录清洗前内容。
+- **指纹边界**：`EmbeddingDescriptor` 新增可选 `privacy_policy_version`，**只有 API Embedding** 会带上该版本，因此切换清洗策略即改变 `embedding_fingerprint` 并按既有机制触发 API 向量重建；**Local / Fake 的指纹与 `pipeline_fingerprint` 完全不变**（字段为 `None` 时不进入 `as_dict()`）。Reranker 描述符同样记录清洗版本，但其指纹**仍不进入** `pipeline_fingerprint`，不触发任何文档索引重建（已有回归测试）。
+- **Top 6 硬上限**：新增 `RERANK_TOP_K_MAX = 6` 与唯一决定点 `resolve_rerank_limit()`：RRF 输入仍是最多 20 条；显式 `top_k` 优先于配置；**任何情况下输出都不得超过 6 条**；`top_k=0` 或负数稳定返回 0 条（且不调用 Provider）；调用方仍可请求少于 6 条。
+- **API 配置校验**：`ApiReranker` 与 `ApiEmbeddingProvider` 的 API 模式均校验 **Base URL + model + API Key**，缺失时返回固定的安全原因（`api_rerank_not_configured` / `api_embedding_not_configured`），不泄漏任何配置值。
+- **API readiness 语义**：两者统一为**证据式** readiness —— 只有一次真实请求且响应结构校验成功后才 `loaded=true`；失败或 `close()` 后恢复 `false`；健康检查本身不联网、不加载模型，仅凭配置绝不谎报。
+- **计时**：`rerank_elapsed_ms` 改为**只统计 Reranker 阶段**（从调用 Provider 前开始计时），不再把 Dense / FTS / RRF 耗时算进去；Hybrid 耗时仍保留在 `RetrievalDiagnostics.elapsed_ms`（有确定性可重复测试）。
+- **验收**：`docker compose exec backend pytest` → **324 passed**（修复前 301）；`docker run --rm --network none … pytest tests/test_stage5_fixes.py tests/test_rerank_provider.py -q` → **48 passed**；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、GPU 合并 `config`（仅静态）、`ps`、`/api/health`、`logs` 全部符合预期。
+- **资源保护**：默认 backend 镜像仍**没有** torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；未下载任何模型、未安装重型依赖、未启动 GPU Profile。
+- **边界**：**真实 Local 模型仍未下载、未运行**，默认 Local 环境 `embedding.ready=false`、`reranker.ready=false`，整体仍为 `degraded`（`chat=unconfigured`、`planning=unavailable`）。阶段 6 仍未开始。
+
 ## 阶段 4 结论（FTS5、混合检索与演示数据集原子激活）
 
 - 输出：`backend/app/search/`（`schema.py` FTS5 结构、`text.py` 确定性中文规范化与安全 MATCH 构造、`fts.py` 索引写入与精确对账、`eligibility.py` 可检索资格、`hydrate.py` 候选补全、`keyword.py` / `dense.py` / `hybrid.py` 三路检索）、`backend/app/demo/activation.py`（原子激活与退役）、`backend/app/api/retrieval.py`（`/api/sources/{chunk_id}`、`/api/retrieval/options`）、`backend/app/documents/categories.py`（类别中文标签）；`document_chunks.fts_rowid`、`demo_active_dataset.active_marker`；新增测试 `test_fts_index.py`、`test_keyword_retriever.py`、`test_retrieval_hybrid.py`、`test_reconciliation.py`、`test_activation.py`、`test_sources_api.py`。

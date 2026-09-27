@@ -12,11 +12,16 @@ OpenAI 没有统一的 Rerank 标准，本项目固定采用以下内部约定�
 
     {"results": [{"index": 0, "relevance_score": 0.0}, ...]}
 
-- 使用 Bearer 认证与显式 timeout；缺少必要配置即明确失败。
+- 使用 Bearer 认证与显式 timeout；Base URL、model、API Key 缺一即明确失败
+  （安全、稳定的错误原因，不含任何配置值）。
 - 返回的 ``index`` 必须唯一、完整且在范围内；服务端乱序返回时按 ``index`` 映射回输入。
 - ``relevance_score`` 必须是有限浮点数。
+- **隐私边界**：外发前对 ``query`` 与候选文本**副本**执行确定性个人信息清洗
+  （``app.core.privacy``）；原始 ``RetrievedChunk``、citation、quote 与库内数据不被修改。
 - 只发送 ``query`` 与必要候选片段；不发送文件名、绝对路径、locator、引用元数据或整份文档。
-- 错误、异常与日志不得泄漏 API Key、Base URL、请求正文、响应正文或候选全文。
+- 错误、异常与日志不得泄漏 API Key、Base URL、请求正文、响应正文、候选全文或清洗前正文。
+- ``loaded`` 采用证据式 readiness：只有一次请求与响应结构校验真正成功后才是 true；
+  失败或 ``close`` 后恢复 false，绝不因为「填写了配置」而谎报远端可用。
 - 基础测试只使用 httpx mock，不访问真实 API。
 """
 
@@ -33,6 +38,7 @@ from app.core.errors import (
     RERANK_RESPONSE_INVALID,
     ApiError,
 )
+from app.core.privacy import scrub, scrub_texts
 from app.rerank.base import RerankProvider, descriptor_for
 
 
@@ -40,14 +46,22 @@ class ApiReranker(RerankProvider):
     def __init__(self, settings: Settings):
         self.settings = settings
         self.descriptor = descriptor_for(settings)
+        self._ready = False
 
     @property
     def loaded(self) -> bool:
-        """不发起探测请求：仅凭配置不能声称远端真实可用。"""
-        return False
+        """是否已有一次真实成功的请求；不发起探测请求。"""
+        return self._ready
+
+    def close(self) -> None:
+        self._ready = False
 
     def _require_config(self) -> None:
-        if not (self.settings.rerank_base_url and self.settings.rerank_model):
+        if not (
+            self.settings.rerank_base_url
+            and self.settings.rerank_model
+            and self.settings.rerank_api_key
+        ):
             raise ApiError(
                 RERANK_PROVIDER_UNAVAILABLE, details={"reason": "api_rerank_not_configured"}
             )
@@ -55,16 +69,27 @@ class ApiReranker(RerankProvider):
     def rerank(self, query: str, candidates: Sequence[str]) -> list[float]:
         if not candidates:
             return []
+        try:
+            scores = self._rerank(query, candidates)
+        except Exception:
+            self._ready = False
+            raise
+        self._ready = True
+        return scores
+
+    def _rerank(self, query: str, candidates: Sequence[str]) -> list[float]:
         self._require_config()
 
         endpoint = f"{self.settings.rerank_base_url.rstrip('/')}/rerank"
-        headers = {"Content-Type": "application/json"}
-        if self.settings.rerank_api_key:
-            headers["Authorization"] = f"Bearer {self.settings.rerank_api_key}"
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {self.settings.rerank_api_key}",
+        }
+        # 只清洗外发副本：数量与顺序保持不变，因此 index 仍与原始候选一一对应
         payload = {
             "model": self.settings.rerank_model,
-            "query": query,
-            "documents": list(candidates),
+            "query": scrub(query),
+            "documents": scrub_texts(list(candidates)),
             "top_n": len(candidates),
         }
 

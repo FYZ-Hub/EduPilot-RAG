@@ -101,11 +101,48 @@ def test_fake_reranker_is_rejected_in_production(tmp_path) -> None:
 # --- Local ------------------------------------------------------------------
 
 
-class _RecordingCrossEncoder:
+class _StrictCrossEncoder:
+    """严格复刻 ``sentence-transformers==3.3.1`` 的 ``CrossEncoder.__init__`` 签名。
+
+    刻意**不使用** ``**kwargs``：任何拼错的或该版本不存在的关键字都必须抛出
+    ``TypeError``，而不是被静默吞掉。
+    """
+
     calls: list = []
 
-    def __init__(self, model_name, **kwargs):
-        type(self).calls.append({"model": model_name, **kwargs})
+    def __init__(
+        self,
+        model_name: str,
+        num_labels: int | None = None,
+        max_length: int | None = None,
+        device: str | None = None,
+        automodel_args: dict | None = None,
+        tokenizer_args: dict | None = None,
+        config_args: dict | None = None,
+        cache_dir: str | None = None,
+        trust_remote_code: bool = False,
+        revision: str | None = None,
+        local_files_only: bool = False,
+        default_activation_function=None,
+        classifier_dropout: float | None = None,
+    ) -> None:
+        type(self).calls.append(
+            {
+                "model": model_name,
+                "num_labels": num_labels,
+                "max_length": max_length,
+                "device": device,
+                "automodel_args": automodel_args,
+                "tokenizer_args": tokenizer_args,
+                "config_args": config_args,
+                "cache_dir": cache_dir,
+                "trust_remote_code": trust_remote_code,
+                "revision": revision,
+                "local_files_only": local_files_only,
+                "default_activation_function": default_activation_function,
+                "classifier_dropout": classifier_dropout,
+            }
+        )
         self.model = types.SimpleNamespace(eval=lambda: None)
         self.predict_calls: list = []
 
@@ -115,14 +152,21 @@ class _RecordingCrossEncoder:
 
 
 def _install_fake_local_stack(monkeypatch, *, cuda_available: bool = True) -> None:
-    _RecordingCrossEncoder.calls = []
+    _StrictCrossEncoder.calls = []
     torch = types.ModuleType("torch")
     torch.cuda = types.SimpleNamespace(is_available=lambda: cuda_available)
     torch.no_grad = lambda: contextlib.nullcontext()
     sentence_transformers = types.ModuleType("sentence_transformers")
-    sentence_transformers.CrossEncoder = _RecordingCrossEncoder
+    sentence_transformers.CrossEncoder = _StrictCrossEncoder
     monkeypatch.setitem(sys.modules, "torch", torch)
     monkeypatch.setitem(sys.modules, "sentence_transformers", sentence_transformers)
+
+
+def test_strict_stub_matches_sentence_transformers_3_3_1_signature() -> None:
+    """Stub 与真实 3.3.1 一致：接受 cache_dir，拒绝 cache_folder。"""
+    _StrictCrossEncoder("m", cache_dir="/tmp/models")
+    with pytest.raises(TypeError):
+        _StrictCrossEncoder("m", cache_folder="/tmp/models")  # type: ignore[call-arg]
 
 
 def test_local_reranker_is_lazy_and_reports_missing_dependency(tmp_path) -> None:
@@ -165,14 +209,15 @@ def test_local_reranker_uses_bounded_pinned_configuration(tmp_path, monkeypatch)
     assert scores == [0.75, 0.75, 0.75]
     assert provider.loaded is True
 
-    call = _RecordingCrossEncoder.calls[0]
+    call = _StrictCrossEncoder.calls[0]
     assert call["model"] == "BAAI/bge-reranker-v2-m3"
     assert call["revision"] == LOCAL_RERANK_MODEL_REVISION
     assert call["device"] == "cpu"
     assert call["max_length"] == RERANK_MAX_LENGTH
     assert call["trust_remote_code"] is False
     assert call["local_files_only"] is True
-    assert call["cache_folder"] == str(tmp_path / "models")
+    # sentence-transformers 3.3.1 的真实参数名是 cache_dir（不是 cache_folder）
+    assert call["cache_dir"] == str(tmp_path / "models")
 
 
 def test_local_reranker_cuda_unavailable_fails_without_cpu_fallback(tmp_path, monkeypatch) -> None:
@@ -185,7 +230,7 @@ def test_local_reranker_cuda_unavailable_fails_without_cpu_fallback(tmp_path, mo
     assert error.value.code == "RERANK_PROVIDER_UNAVAILABLE"
     assert error.value.details.get("reason") == "cuda_unavailable"
     # 绝不静默回退 CPU：模型根本没有被构造
-    assert _RecordingCrossEncoder.calls == []
+    assert _StrictCrossEncoder.calls == []
     assert provider.loaded is False
 
 
