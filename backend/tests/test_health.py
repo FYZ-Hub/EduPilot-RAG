@@ -14,11 +14,12 @@ def test_health_reports_degraded_without_business_features(client: TestClient) -
     payload = client.get("/api/health").json()
 
     assert payload["status"] == "degraded"
-    # 阶段 6：Chat 已实现。没有可检索文档时 chat=unavailable（不是 unconfigured）。
+    # 阶段 7C：规划路由与确定性引擎已注册 -> planning=ready（空库也成立）。
+    # 没有可检索文档时 chat=unavailable（不是 unconfigured）。
     assert payload["capabilities"] == {
         "documents": "unavailable",
         "chat": "unavailable",
-        "planning": "unavailable",
+        "planning": "ready",
     }
     assert isinstance(payload["version"], str) and payload["version"]
 

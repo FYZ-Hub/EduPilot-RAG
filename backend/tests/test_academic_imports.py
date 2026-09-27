@@ -708,12 +708,10 @@ def test_source_ids_are_real_and_same_document(client, context) -> None:
         assert rows
         for row in rows:
             assert row.source_doc_id == document.id
-            # 学业导入不建立切片，因此必须留空而不是伪造 chunk_id
-            assert row.source_chunk_id is None
-        chunk_count = session.scalar(
-            select(func.count(DocumentChunk.id)).where(DocumentChunk.doc_id == document.id)
-        )
-    assert chunk_count == 0
+            # 阶段 7C：来源定位必须是**真实存在**且属于同一文档的证据切片，绝不伪造
+            chunk = session.get(DocumentChunk, row.source_chunk_id)
+            assert chunk is not None, "source_chunk_id 必须指向真实 DocumentChunk"
+            assert chunk.doc_id == document.id, "证据切片必须与记录同属一份文档"
 
 
 # ---------------------------------------------------------------------------
@@ -760,12 +758,6 @@ def test_source_commit_failure_returns_stable_error(client, monkeypatch) -> None
     _assert_error(response, "ACADEMIC_SOURCE_UNAVAILABLE")
 
 
-def test_health_still_reports_planning_unavailable(client) -> None:
+def test_health_reports_planning_ready(client) -> None:
     payload = client.get("/api/health").json()
-    assert payload["capabilities"]["planning"] == "unavailable"
-
-
-def test_plan_endpoint_is_not_implemented(client) -> None:
-    response = client.post("/api/academic/plan", json={})
-    assert response.status_code == 404
-    assert response.json()["code"] == "NOT_FOUND"
+    assert payload["capabilities"]["planning"] == "ready"

@@ -49,7 +49,8 @@ def active_demo_version(session: Session) -> str | None:
     return versions[0]
 
 
-def _visibility(model, active_version: str | None):
+def visibility_clause(model, active_version: str | None):
+    """demo / upload 的可选可见性口径；``options`` 与 ``plan`` **必须共用**这一处定义。"""
     upload_branch = model.source_type == constants.SOURCE_UPLOAD
     if active_version is None:
         return upload_branch
@@ -76,7 +77,7 @@ def record_set_options(session: Session, active_version: str | None) -> list[dic
         .where(
             AcademicRecordSet.status == constants.STATUS_READY,
             Document.deleted_at.is_(None),
-            _visibility(AcademicRecordSet, active_version),
+            visibility_clause(AcademicRecordSet, active_version),
         )
     ).all()
     items = [
@@ -102,7 +103,7 @@ def rule_set_options(session: Session, active_version: str | None) -> list[dict]
         .where(
             AcademicRuleSet.status == constants.STATUS_READY,
             Document.deleted_at.is_(None),
-            _visibility(AcademicRuleSet, active_version),
+            visibility_clause(AcademicRuleSet, active_version),
         )
     ).all()
     items = [

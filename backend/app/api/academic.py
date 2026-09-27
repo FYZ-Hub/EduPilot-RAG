@@ -1,22 +1,35 @@
-"""学业规划接口（阶段 7B-2）：课程记录 / 培养方案导入与可选上下文。
+"""学业规划接口（阶段 7B-2 / 7C）。
 
-本阶段只实现 ``POST /api/academic/records/import``、``POST /api/academic/rules/import``
-与 ``GET /api/academic/options``；**不实现** ``POST /api/academic/plan``，
-``GET /api/health`` 的 ``planning`` 仍为 ``unavailable``。
-
-两个导入接口固定为 ``multipart/form-data``（``file`` 必填、``name`` 可选），
-成功响应严格为 ``{id, status, warnings}``，不含来源键、路径、哈希或身份字段。
+- ``POST /api/academic/records/import``、``POST /api/academic/rules/import``：
+  固定 ``multipart/form-data``（``file`` 必填、``name`` 可选），成功响应严格为
+  ``{id, status, warnings}``，不含来源键、路径、哈希或身份字段。
+- ``GET /api/academic/options``：恢复可选上下文；无数据时返回两个空数组，不返回默认选中项。
+- ``POST /api/academic/plan``：请求体**只允许**两个显式 ID，响应直接是 ``PlanningResult``
+  （顶层严格 8 个字段），数字只能来自 7A 的确定性引擎，不经过任何 LLM。
 """
 
 from __future__ import annotations
 
+from uuid import UUID
+
 from fastapi import APIRouter, Depends, File, Form, UploadFile
+from pydantic import BaseModel, ConfigDict
 from sqlalchemy.orm import Session
 
-from app.academic import imports, options
+from app.academic import imports, options, planning
+from app.academic.types import planning_result_payload
 from app.api.deps import AppContext, get_context, get_session
 
 router = APIRouter(prefix="/academic", tags=["academic"])
+
+
+class AcademicPlanRequest(BaseModel):
+    """``POST /api/academic/plan`` 的请求体：字段固定，禁止任何额外字段。"""
+
+    model_config = ConfigDict(extra="forbid")
+
+    record_set_id: UUID
+    rule_set_id: UUID
 
 
 @router.post("/records/import")
@@ -51,3 +64,16 @@ async def import_rules(
 def read_options(session: Session = Depends(get_session)) -> dict:
     """恢复可选上下文；无数据时返回两个空数组，不返回默认选中项。"""
     return options.academic_options(session)
+
+
+@router.post("/plan")
+def create_plan(
+    payload: AcademicPlanRequest,
+    context: AppContext = Depends(get_context),
+    session: Session = Depends(get_session),
+) -> dict:
+    """按用户**显式选择**的两个 ID 计算规划；响应直接是 ``PlanningResult``。"""
+    result = planning.build_plan(
+        session, context.settings, str(payload.record_set_id), str(payload.rule_set_id)
+    )
+    return planning_result_payload(result)

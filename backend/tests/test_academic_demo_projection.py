@@ -458,9 +458,9 @@ def test_demo_source_key_is_internal_only(projected) -> None:
     assert "source_key" not in repr(report)
 
 
-def test_health_still_reports_planning_unavailable(client) -> None:
+def test_health_reports_planning_ready(client) -> None:
     payload = client.get("/api/health").json()
-    assert payload["capabilities"]["planning"] == "unavailable"
+    assert payload["capabilities"]["planning"] == "ready"
     assert payload["status"] == "degraded"
 
 

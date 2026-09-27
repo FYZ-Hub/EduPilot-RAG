@@ -149,7 +149,8 @@ def test_default_local_environment_stays_degraded(tmp_path) -> None:
     application.state.context.engine.dispose()
 
     assert payload["status"] == "degraded"
-    assert payload["capabilities"]["planning"] == "unavailable"
+    # 阶段 7C 起 planning 与 Provider 是否配置无关，恒为可用
+    assert payload["capabilities"]["planning"] == "ready"
     assert payload["providers"]["embedding"]["provider"] == "local"
     assert payload["providers"]["embedding"]["ready"] is False
     assert payload["providers"]["reranker"]["ready"] is False

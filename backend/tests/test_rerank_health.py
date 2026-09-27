@@ -32,11 +32,11 @@ def test_health_reports_fake_reranker_ready(tmp_path) -> None:
         "ready": True,
     }
     assert payload["status"] == "degraded"
-    # 阶段 6：Chat 已实现，但没有可检索文档时 chat=unavailable
+    # 阶段 7C：planning 恒为 ready；没有可检索文档时 chat=unavailable
     assert payload["capabilities"] == {
         "documents": "unavailable",
         "chat": "unavailable",
-        "planning": "unavailable",
+        "planning": "ready",
     }
 
 

@@ -1,4 +1,4 @@
-"""阶段 7B-2：上传学业资料的确定性导入（课程记录 / 培养方案规则）。
+"""阶段 7B-2 / 7C：上传学业资料的确定性导入（课程记录 / 培养方案规则）。
 
 设计要点：
 
@@ -9,13 +9,17 @@
   **只**从这些块（表格结构）提取，绝不从 ``DocumentChunk`` 正文提取。
 - **先校验后落盘**：文件安全校验、解析与投影全部通过后，才把文件提交到上传目录并写入
   数据库；写入在**单个事务**内完成。任一环节失败都不产生可见集合，也不留下部分子项。
+- **真实证据**：同一事务内建立**证据切片**并回填 ``source_chunk_id``，使
+  ``PlanningEvidence`` 能引用真实 chunk 与真实定位（见 ``app.academic.evidence``）。
 - **检索隔离**：导入建立的 ``Document`` 只作为学业证据来源，``retrievable`` 恒为
-  ``False``，不进入 RAG 检索语料，也不伪造向量 / FTS 完成状态，更不污染 demo 数据集。
+  ``False``，证据切片不建向量、不写 FTS、不建 ``DocumentPipelineState``，
+  因此 RAG worker 仍不会认领它，也不污染 demo 数据集。
 """
 
 from __future__ import annotations
 
 import logging
+from collections.abc import Sequence
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -25,6 +29,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app import constants
+from app.academic.evidence import (
+    ensure_evidence_chunks,
+    resolve_block_chunk,
+    resolve_chunk_by_block,
+)
 from app.academic.projection import (
     SourceBlockView,
     project_record_rows,
@@ -35,10 +44,17 @@ from app.academic.projection import (
     rule_set_fingerprint,
     safe_display_name,
 )
-from app.academic.service import PROJECTION_READY, RECORD_DOC_CATEGORY, RULE_DOC_CATEGORY
+from app.academic.service import (
+    PROJECTION_READY,
+    RECORD_DOC_CATEGORY,
+    RULE_DOC_CATEGORY,
+    load_chunk_locators,
+    resolve_source_chunk,
+)
 from app.academic.types import AcademicDataError, credit_text
 from app.config import Settings
 from app.core.errors import (
+    ACADEMIC_EVIDENCE_UNAVAILABLE,
     ACADEMIC_FILE_TYPE_UNSUPPORTED,
     ACADEMIC_PARSE_FAILED,
     ACADEMIC_PERSIST_FAILED,
@@ -122,6 +138,24 @@ def _as_api_error(error: AcademicDataError) -> ApiError:
     """领域校验错误 → 稳定 HTTP 错误体；内部诊断信息不对外泄漏。"""
     logger.info("academic_import_rejected code=%s", error.code)
     return ApiError(error.code)
+
+
+def _require_chunk(chunk_id: str | None, block_index: int) -> str:
+    """业务行必须有真实证据切片；定位不到就明确失败，绝不写入伪造 ID。"""
+    if not chunk_id:
+        raise ApiError(
+            ACADEMIC_EVIDENCE_UNAVAILABLE, details={"reason": f"block:{block_index}"}
+        )
+    return chunk_id
+
+
+def _view_at(views: Sequence[SourceBlockView], index: int | None) -> SourceBlockView | None:
+    if index is None:
+        return None
+    for view in views:
+        if view.block_index == index:
+            return view
+    return None
 
 
 def _parse_upload(pending) -> tuple:
@@ -261,6 +295,9 @@ def _persist_import(
         session.flush()
         _persist_blocks(session, document_id, blocks)
         session.flush()
+        # 证据切片与 DocumentBlock 处于同一事务：导入成功即具备真实证据来源
+        ensure_evidence_chunks(session, settings, document)
+        session.flush()
         created = build_set(document)
         session.commit()
     except IntegrityError as error:
@@ -295,8 +332,9 @@ async def import_record_set(
             return ImportResult(existing.id, existing.status)
 
         blocks = _parse_upload(pending)
+        views = _block_views(blocks)
         try:
-            drafts = project_record_rows(_block_views(blocks))
+            drafts = project_record_rows(views)
         except AcademicDataError as error:
             raise _as_api_error(error) from error
         display_name = _requested_display_name(name) or record_set_display_name(
@@ -309,7 +347,19 @@ async def import_record_set(
 
     document_id = new_uuid()
 
+    def _record_chunk(locators, draft) -> str | None:
+        chunk_id = resolve_source_chunk(
+            locators,
+            sheet_name=draft.sheet_name,
+            row_start=draft.row_start,
+            row_end=draft.row_end,
+        )
+        if chunk_id is None:
+            chunk_id = resolve_chunk_by_block(locators, draft.block_index)
+        return chunk_id
+
     def build_set(document: Document) -> AcademicRecordSet:
+        locators = load_chunk_locators(session, document.id)
         record_set = AcademicRecordSet(
             source_type=constants.SOURCE_UPLOAD,
             source_key=document.source_key,
@@ -339,8 +389,8 @@ async def import_record_set(
                     semester=record.semester,
                     schedule=record.schedule,
                     source_doc_id=document.id,
-                    # 学业导入文档不建立切片，因此来源定位只能留空，绝不伪造 chunk_id
-                    source_chunk_id=None,
+                    # 来源定位来自真实证据切片；无法定位时明确失败，绝不伪造 chunk_id
+                    source_chunk_id=_require_chunk(_record_chunk(locators, draft), draft.block_index),
                     source_block_id=str(draft.block_index),
                     sheet_name=draft.sheet_name,
                     row_start=draft.row_start,
@@ -381,8 +431,9 @@ async def import_rule_set(
 
         blocks = _parse_upload(pending)
         document_id = new_uuid()
+        views = _block_views(blocks)
         try:
-            draft = project_rule_set_blocks(_block_views(blocks), doc_id=document_id)
+            draft = project_rule_set_blocks(views, doc_id=document_id)
         except AcademicDataError as error:
             raise _as_api_error(error) from error
         rule_set = draft.rule_set
@@ -398,6 +449,19 @@ async def import_rule_set(
     def build_set(document: Document) -> AcademicRuleSet:
         if document.id != rule_set.source_doc_id:  # pragma: no cover - 内部不变量
             raise ApiError(ACADEMIC_SOURCE_UNAVAILABLE)
+        locators = load_chunk_locators(session, document.id)
+        header_chunk = _require_chunk(
+            resolve_block_chunk(locators, _view_at(views, draft.header_block_index)),
+            draft.header_block_index,
+        )
+        category_chunks = {
+            name: _require_chunk(resolve_block_chunk(locators, _view_at(views, index)), index)
+            for name, index in draft.category_blocks
+        }
+        course_chunks = {
+            code: _require_chunk(resolve_block_chunk(locators, _view_at(views, index)), index)
+            for code, index in draft.course_blocks
+        }
         stored = AcademicRuleSet(
             source_type=constants.SOURCE_UPLOAD,
             source_key=document.source_key,
@@ -414,8 +478,7 @@ async def import_rule_set(
             course_count=len(rule_set.courses),
             content_hash=content_hash,
             source_doc_id=document.id,
-            # 规则集合不写入未验证的切片引用
-            source_chunk_id=None,
+            source_chunk_id=header_chunk,
         )
         session.add(stored)
         session.flush()
@@ -432,7 +495,7 @@ async def import_rule_set(
                     required_course_codes=list(declaration.required_course_codes),
                     effective_from=declaration.effective_from,
                     source_doc_id=document.id,
-                    source_chunk_id=None,
+                    source_chunk_id=category_chunks[declaration.category],
                 )
             )
         for ordinal, course in enumerate(rule_set.courses):
@@ -445,7 +508,7 @@ async def import_rule_set(
                     credits=credit_text(course.credits),
                     category=course.category,
                     source_doc_id=document.id,
-                    source_chunk_id=None,
+                    source_chunk_id=course_chunks[course.course_code],
                 )
             )
         session.flush()

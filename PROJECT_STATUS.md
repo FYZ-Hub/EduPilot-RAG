@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 7 进行中（7A、7B-1、7B-2 已完成，下一步 7C）**
-- 下一阶段：**阶段 7C — `POST /api/academic/plan` 与全量验收**（health `planning` 仍为 `unavailable`）
+- 当前阶段：**阶段 7 已完成（7A、7B-1、7B-2、7C 全部完成）**
+- 下一阶段：**阶段 8 — Vue 核心页面**（知识库管理 / RAG 问答 / 学业规划，实施前必须读取 `docs/UI_SPEC.md`）
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -17,10 +17,96 @@
 | 4 | FTS5 与混合检索 | completed |
 | 5 | Reranker | completed |
 | 6 | SSE 问答与引用 | completed |
-| 7 | 确定性学分规则引擎 | in_progress |
+| 7 | 确定性学分规则引擎 | completed |
 | 8 | Vue 核心页面 | not_started |
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 7C 结论（确定性学业规划 API、真实证据与健康能力）
+
+**阶段 7 已完成**：7A（持久化与纯计算引擎）、7B-1（demo 投影）、7B-2（导入与 options）、
+7C（规划 API、真实证据、健康能力）全部验收通过。阶段 8 保持 `not_started`。
+
+### 学业导入的真实证据锚点
+
+学业导入文档只保存 `DocumentBlock`（7B-2），而 `PlanningEvidence` 必须引用真实 chunk。
+本轮新增 `app/academic/evidence.py`：
+
+- 复用正式确定性切片组件（`chunk_blocks` + `build_chunk_records` + `compute_chunk_id`），
+  **绝不**使用随机 ID；证据切片使用**独立剖面版本** `1.0.0+academic-evidence-v1`，
+  因此同一份文件即使同时存在于普通上传通道与学业导入通道，chunk_id 也**不会碰撞**。
+- 只写 `document_chunks`：**不建向量、不写 FTS（`fts_rowid` 保持 NULL）、
+  不创建 `DocumentPipelineState`、`retrievable` 仍为 `false`**；RAG worker 依旧不认领。
+- `source_chunk_id` 回填到 `CourseRecordRow` / `AcademicRuleSet` / `DegreeRuleRow` /
+  `DegreeRuleCourse`；映射来自**同一文档**的真实 locator（XLSX 按工作表/行，
+  PDF/DOCX 按页/标题，块级覆盖），多候选沿用 7B-1 的稳定排序。
+- 导入时在**同一事务**内建立证据并回填；对 7B-2 以前 `source_chunk_id` 为 NULL 的数据，
+  规划入口会**幂等补建与回填**（重复执行零新增、chunk ID 不变）。
+- 业务字段仍只来自 `DocumentBlock`，绝不从 chunk 正文重新提取。
+
+### `POST /api/academic/plan`
+
+- 请求体**只允许** `record_set_id` 与 `rule_set_id`（`extra="forbid"`，非法 UUID / 缺字段 /
+  多余字段一律 422 统一错误体 + `request_id`）；两个 ID 必须由用户**显式选择**，
+  后端绝不自动选择第一个、最新版本或默认规则。
+- 可见性口径与 `GET /api/academic/options` **共用同一处定义**：demo 必须属于唯一 active 版本、
+  `activation_state=active`、`status=ready`、来源有效；upload 必须 `status=ready` 且来源有效。
+  不可见 / inactive / candidate / 旧版本 → `ACADEMIC_RECORD_SET_NOT_FOUND` /
+  `ACADEMIC_RULE_SET_NOT_FOUND`（404）；来源文档已删除 → `ACADEMIC_SOURCE_INVALID`（409）。
+- **唯一计算路径**是 7A 的纯函数 `compute_plan()`：`app/academic/planning.py` 只做
+  「ID → 数据库行 → 7A 数据类 → 真实证据」的装配，**不实现**任何学分加减、缺口、去重或
+  类别计算；LLM / Embedding / Reranker / 网络均不参与。
+- 响应直接是 `PlanningResult`：顶层严格 8 个字段（不重新加入 `major` / `rule_version` /
+  `record_set_id` / `rule_set_id`），数字一位小数且非负。
+
+### 证据与冲突
+
+- 每条 `PlanningEvidence` 严格 11 个字段；`chunk_id` 必须对应真实 `DocumentChunk` 行，
+  `doc_id` 与 chunk 所属文档一致，`quote` 是该 chunk 的**真实文本**，
+  定位字段来自 `chunk.locator`；不返回路径、`source_key`、哈希、向量分数或内部指纹。
+- 证据按 `(doc_id, chunk_id)` 稳定排序并去重；所有 `missing_required_courses[*].evidence_chunk_ids`
+  与 `conflict_warnings[*].evidence_chunk_ids` 都必须在顶层 `evidence` 中存在。
+  跨文档 chunk、失效 chunk、不完整 locator 一律 `ACADEMIC_EVIDENCE_UNAVAILABLE` 安全失败。
+- **版本冲突**：以所选 rule set 计算，检查当前同样合法的同专业其它版本，产生
+  `DEGREE_PLAN_VERSION_CONFLICT`，证据同时覆盖所选版本与冲突版本的真实来源。
+- **课程记录矛盾 / 类别不一致 / 目录外课程 / 未知必修**：继续由 7A 引擎产生既有稳定 code；
+  证据取所选记录集合 / 所选规则的真实切片，确保覆盖相关行。
+- **时间冲突**：先看所选记录自身 `schedule` 的确定性结构（星期 + 节次或时刻区间，
+  同单位且区间真实重叠才算冲突）；对 active demo 再从正式**课表 `DocumentBlock`**
+  按星期 / 节次确定性匹配真实重复排课。禁止从 chunk 正文或 LLM 猜测时间；
+  证据覆盖冲突双方课程来源；没有足够证据时不产生冲突。
+
+### 健康能力
+
+- `GET /api/health` 的 `capabilities.planning` 改为 `ready`：规划路由已注册、确定性引擎可用、
+  学业数据结构可读；**不依赖**库里是否已有可选集合（空库同样 `ready`）。
+- 健康检查只做一次轻量结构探测，不运行任何规划计算、不加载数据集、不下载模型、不访问网络；
+  `documents` / `chat` / `providers` 的真实语义未改动，整体 `status` 仍如实为 `degraded`。
+
+### 验收
+
+- 新增 `tests/test_academic_plan.py`（23 项）、`tests/test_academic_evidence_chunks.py`（8 项）、
+  `tests/test_academic_plan_ground_truth.py`（2 项）：请求契约、可见性与错误码、显式选择、
+  Student A/B 与两个规则版本、upload 与跨来源选择、重修/重复/在修/failed、类别优先级与 warning、
+  总缺口 0 仍保留 missing、版本冲突双方证据、矛盾证据、时间冲突双方证据（含「不同单位不猜」）、
+  证据真实性与严格字段、不泄漏内部字段、字节级稳定、重启一致、无模型/网络依赖、
+  证据补建与幂等回填、以及 `ground_truth.jsonl` 的**全部 planning 条目**逐字段验收。
+- ground truth 比对口径（已在测试内注明）：数值 / 缺失必修 / 类别缺口逐字段相等；
+  oracle 的 `major` / `rule_version` / `admission_year` 不属于 `PlanningResult`，断言**不返回**；
+  告警 code 以 oracle 为下界并要求顺序一致 —— oracle 生成于 7A BUG-7A-02 修复之前，
+  未列出「正考不及格 + 重修通过」这一真实矛盾，而本轮规格（第七节）要求继续产生该告警，
+  因此显式允许该项为**新增**告警，其余任何未预期告警都会失败。oracle 的 `evidence`
+  `chunk_id` 生成时全为 `null`，因此改为校验**真实 chunk 关联**而不做逐字节比对。
+- `docker compose exec backend pytest -q` → **659 passed**；
+  前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`
+  符合预期；真实 HTTP：`GET /api/health` → `planning=ready`、`GET /api/academic/options` → 200、
+  `POST /api/academic/plan` 对未知 ID → 404 + 非空 `request_id`、缺字段/多余字段 → 422。
+- 契约更新（**不是**产品 Bug）：7B-2 曾断言「学业导入文档 `source_chunk_id` 为 NULL / 无切片」，
+  7C 要求真实证据锚点，因此 `test_source_ids_are_real_and_same_document` 改为断言引用真实切片；
+  `planning=unavailable` 与「plan 未实现」的旧断言改随本阶段契约更新。
+- 未调用任何真实 API、未使用 LLM 参与数值计算、未下载或加载模型、未启动 GPU Profile。
+- **已知遗留**：`frontend/src/views/PlanningView.vue` 仍写着「health 返回 planning=unavailable」
+  的占位说明，已因本阶段而失效；按本轮范围（禁止 Vue 页面与阶段 8 功能）未改动，留待阶段 8 一并重写。
 
 ## 阶段 7A 结论（确定性学分规则引擎 · 持久化与纯计算）
 
