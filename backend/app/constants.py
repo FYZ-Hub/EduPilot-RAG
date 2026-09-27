@@ -11,11 +11,11 @@ SOURCE_DEMO = "demo"
 SOURCE_UPLOAD = "upload"
 SOURCE_TYPES = (SOURCE_DEMO, SOURCE_UPLOAD)
 
-# 学业导入文档使用的类别（与 demo 学业资料同名）：
-# 它们只作为学业证据来源，不属于 RAG 检索语料，因此上传 worker 与上传去重都跳过它们。
+# 学业资料使用的业务内容分类（与 demo 学业资料同名）：
+# 这是**业务分类**，不是上传通道或流水线所有权标识；普通上传的培养方案 / 成绩记录
+# 同样属于这些类别，因此任何取决于来源通道的判断都必须改用 document_pipeline_state。
 DOC_CATEGORY_COURSE_RECORDS = "course_records"
 DOC_CATEGORY_DEGREE_PLAN = "degree_plan"
-ACADEMIC_DOC_CATEGORIES = (DOC_CATEGORY_COURSE_RECORDS, DOC_CATEGORY_DEGREE_PLAN)
 
 # 支持的文档格式
 FILE_TYPE_PDF = "pdf"

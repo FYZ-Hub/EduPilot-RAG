@@ -1332,13 +1332,15 @@ class Worker:
         with session_scope(self.session_factory) as session:
             document = session.scalar(
                 select(Document)
+                # 只认领普通上传通道的文档：它们必然有 DocumentPipelineState。
+                # 学业导入文档没有检查点，因此即便 status=queued 也不会被认领；
+                # doc_category 是业务内容分类（degree_plan / course_records …），
+                # 与上传通道无关，不能参与所有权判定。
+                .join(DocumentPipelineState, DocumentPipelineState.doc_id == Document.id)
                 .where(
                     Document.source_type == constants.SOURCE_UPLOAD,
                     Document.status == constants.STATUS_QUEUED,
                     Document.deleted_at.is_(None),
-                    # 学业导入文档只作为学业证据来源，不属于 RAG 检索语料：
-                    # worker 不认领它们，也不会为它们伪造向量 / FTS 完成状态
-                    Document.doc_category.notin_(constants.ACADEMIC_DOC_CATEGORIES),
                 )
                 .order_by(Document.created_at)
                 .limit(1)

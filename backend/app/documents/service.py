@@ -342,14 +342,19 @@ def ensure_pipeline_state(session: Session, document: Document, settings: Settin
 
 
 def find_existing_upload(session: Session, sha256: str) -> Document | None:
+    """在上传来源空间内按 SHA-256 幂等查找。
+
+    流水线**所有权**由是否存在 ``DocumentPipelineState`` 决定：只有走普通上传通道
+    （``register_upload``）建立的文档才有检查点。``doc_category`` 是业务内容分类
+    （培养方案 / 成绩记录等），与上传通道无关，绝不能用来区分来源。
+    """
     return session.scalar(
         select(Document)
+        .join(DocumentPipelineState, DocumentPipelineState.doc_id == Document.id)
         .where(
             Document.source_type == constants.SOURCE_UPLOAD,
             Document.sha256 == sha256,
             Document.deleted_at.is_(None),
-            # 学业导入文档是独立的证据来源，不能被通用上传接口复用
-            Document.doc_category.notin_(constants.ACADEMIC_DOC_CATEGORIES),
         )
         .order_by(Document.created_at.desc())
     )

@@ -217,6 +217,59 @@
 - 未调用任何真实 API、未使用 LLM 参与解析或计算、未下载或加载模型、未启动 GPU Profile；
   未向真实开发数据卷写入学业数据（迁移后 6 张学业表仍为 0 行，`PRAGMA foreign_key_check` 为空）。
 
+### 阶段 7B-2 独立回归修复轮（BUG-7B2-02：上传所有权隔离）
+
+阶段 7 仍为 `in_progress`，`/api/health` 的 `planning` 仍为 `unavailable`；**未实现**
+`POST /api/academic/plan`，未开始 7C。本轮只修复学业导入隔离误伤普通知识库上传的问题。
+
+**BUG-7B2-02｜使用 doc_category 隔离 academic import 导致普通上传去重和 worker 认领失效**
+
+- **原始需求**：academic import 不得进入 RAG 检索语料；但普通知识库上传（解析 → 切片 →
+  向量 → FTS → 可检索）的能力**不得受影响**。
+- **AI 错误假设**：把 `degree_plan` / `course_records` 当成「academic import 的所有权标识」，
+  用 `Document.doc_category.notin_(ACADEMIC_DOC_CATEGORIES)` 去排除学业导入文档。
+- **实际语义**：`doc_category` 是 PRODUCT_SPEC 定义的**业务内容分类**（也是前端过滤字段与
+  `/api/retrieval/options` 的返回值），普通上传的培养方案、成绩记录同样属于这些类别；
+  它与「上传通道 / 流水线所有权」无关，不能用来区分来源。
+- **诚实澄清（避免夸大）**：在 `dd69d89` 上，`POST /api/documents` 建立的文档
+  `doc_category` 恒为 `unknown`（实测 `general_upload_has_pipeline_state=True`、
+  `doc_category='unknown'`、`find_existing_upload=True`、`worker_claim_candidate=True`），
+  因此该缺陷**不会**由当前 HTTP 路径自然触发。但「doc_category 不得影响普通上传的去重、
+  认领、重试或索引」这一不变量在代码层面**已被违反**：只要文档带上业务分类，
+  上述四项能力立刻失效（可用最小复现证明）。
+- **最小复现（修复前）**：`docker compose exec backend pytest
+  tests/test_academic_upload_isolation.py -q` → **5 failed / 2 passed，退出码 1**：
+  普通 degree_plan 上传无法被 worker 认领；普通 course_records 上传无法被认领；
+  同一文件重复上传产生第二个 Document；可重试文档无法被再次认领；
+  普通上传与 academic import 的幂等被业务分类破坏。
+- **根因（文件 / 函数 / 行号）**：
+  - `backend/app/documents/service.py:352` · `find_existing_upload`：`doc_category` 排除
+    使普通上传无法按 SHA-256 查回自己 → 重复上传新建 Document + 多余文件、失败重试分支不可达。
+  - `backend/app/worker/runner.py:1341` · `Worker._run_upload_document`：同一排除使
+    业务分类为学业类别的普通上传**永远不会**被认领，也就永远不会进入 RAG 流水线。
+  - `backend/app/constants.py:18`：把业务分类打包成「学业导入所有权」常量。
+- **最小修复（改用 DocumentPipelineState 判定所有权，不做任何字符串前缀/路径/文件名猜测）**：
+  1. `find_existing_upload` 改为 `JOIN document_pipeline_state`：只在**具有检查点的普通上传
+     文档**中按 SHA-256 查找；academic import 文档没有检查点，因此天然不被复用。
+  2. `Worker._run_upload_document` 同样 `JOIN document_pipeline_state`：只认领普通上传文档；
+     academic import 文档即使 `status=queued` 也不会被认领。
+  3. 删除不再需要的 `constants.ACADEMIC_DOC_CATEGORIES`（保留
+     `DOC_CATEGORY_COURSE_RECORDS` / `DOC_CATEGORY_DEGREE_PLAN` 并在注释中明确其业务分类语义）。
+  4. 普通上传继续在 `register_upload` 中调用 `ensure_pipeline_state`；academic import 仍**不创建**
+     检查点。demo 文档处理、academic options 过滤口径、RAG 资格 SQL 全部未改动。
+- **新增回归测试**：`backend/tests/test_academic_upload_isolation.py`（7 项）——
+  普通 degree_plan / course_records 上传仍可被 worker 认领；业务分类不影响去重；
+  可重试文档仍可被再次认领；无检查点的学业导入文档不被认领且 `retrievable=false`；
+  同一文件的普通上传与 academic import 保持独立所有权、各自幂等、互不删除文件。
+- **修复后**：`docker compose exec backend pytest tests/test_academic_upload_isolation.py -q`
+  → **7 passed，退出码 0**；定向回归
+  （`test_documents_api.py` + `test_upload_security.py` + `test_academic_imports.py`
+  + `test_academic_options.py` + 本轮新增）→ **125 passed，退出码 0**；
+  `docker compose exec backend pytest -q` → **627 passed**（上一轮 620，+7）；
+  前端 `pnpm test` → 11 passed、`pnpm build` 成功；`docker compose config --quiet`、`ps`、
+  `GET /api/health`（`degraded` / `planning=unavailable`）、真实数据卷
+  `PRAGMA foreign_key_check`（空）全部符合预期。
+
 ### 阶段 7A 修复轮（契约与冲突 warning）
 
 阶段 7 仍为 `in_progress`；本轮只修复两个已复现的 7A 缺陷，**未开始 7B**（未实现导入、options API、plan API、health planning ready 与前端功能）。
