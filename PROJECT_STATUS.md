@@ -107,7 +107,7 @@
 
 阶段 5 仍为 `completed`；**未开始阶段 6**。
 
-- 输出：`backend/app/core/privacy.py`（清洗策略 `external-privacy-v2`）、`backend/app/embedding/api.py`（空输入 no-op）、`backend/tests/test_stage5_fixes.py`（新增 14 项回归）。未新增依赖、未改数据库 schema、未改 Compose 结构。
+- 输出：`backend/app/core/privacy.py`（当时策略 `external-privacy-v2`，**现为历史版本**）、`backend/app/embedding/api.py`（空输入 no-op）、`backend/tests/test_stage5_fixes.py`（新增 14 项回归）。未新增依赖、未改数据库 schema、未改 Compose 结构。
 - **BUG-5-03（隐私清洗覆盖不足）**：v1 只覆盖 `标签 + 冒号 + 无空格值`，因此 `姓名 张三`、`姓名：张 三`（只遮掉「张」残留「三」）、`| 姓名 | 张三 |`、`姓名<TAB>张三`、`学号 20260001`、`| 学号 | 20260001 |`、`电话 010-12345678`、`电话：(010) 12345678` 都会把个人信息原样发给外部模型。已在**同一个共享模块**中扩展（不在两个 Provider 里复制规则）：分隔符覆盖**冒号 / 等号 / 空白 / TAB / Markdown 与表格竖线**；标签值允许**内部空格**并清洗到稳定字段边界（遇到下一个 PII 标签、竖线、换行或中文句读即停）；新增**中国大陆固定电话**（`0xx`/`0xxx` 区号，含 `(010)` 括号形式）与带标签的电话规则。课程代码（`QM-CS201`）、课程名称、学分、学期、日期、普通数字**不被误清洗**。仍保持确定性、幂等、完全离线、无 NER、无第三方服务；只清洗外发副本，原 query / candidates / SQLite / Chroma / FTS / citation / quote 零改动。
 - **版本与指纹影响**：`PRIVACY_POLICY_VERSION` 由 `external-privacy-v1` 提升为 **`external-privacy-v2`**（值语义变化必须提升版本）。API Embedding descriptor 带上该版本 ⇒ `embedding_fingerprint` 改变并**按既有机制触发 API 向量重建**；Local / Fake Embedding 仍为 `None` 且**不进入** `as_dict()` ⇒ 指纹与 `pipeline_fingerprint` 逐字节不变；Reranker 描述符记录该版本但**仍不进入** `pipeline_fingerprint`，**不触发任何文档索引重建**。
 - **BUG-5-04（空 Embedding 输入伪造 readiness）**：`embed_documents([])` 此前会构造 HTTP Client（无请求）并返回 `[]`，随后把 `loaded` 从 `false` 置为 `true`，属于「没有真实请求却谎报 ready」。已改为**空输入直接 no-op**：返回 `[]`、不创建 Client、不发送请求，且**既不能伪造成功、也不清除既有成功证据**；只有非空输入经过真实请求并成功校验响应结构后才 `false → true`，失败或 `close()` 后仍恢复 `false`。ApiReranker 的空候选 no-op 行为保持不变（有回归测试）。
@@ -119,13 +119,28 @@
 
 阶段 5 仍为 `completed`；**未开始阶段 6**。
 
-- 输出：`backend/app/core/privacy.py`（清洗策略 `external-privacy-v3`）、`backend/tests/test_stage5_fixes.py`（新增 11 项回归，移除 1 项被取代的 v2 版本断言）。未新增依赖、未改数据库 schema、未改 Compose 结构、未改动两个 API Provider 的调用点（继续共用同一个 `privacy.py`）。
+- 输出：`backend/app/core/privacy.py`（当时策略 `external-privacy-v3`，**现为历史版本**）、`backend/tests/test_stage5_fixes.py`（新增 11 项回归，移除 1 项被取代的 v2 版本断言）。未新增依赖、未改数据库 schema、未改 Compose 结构、未改动两个 API Provider 的调用点（继续共用同一个 `privacy.py`）。
 - **BUG-5-05（隐私清洗误删同一行学术字段）**：v2 的字段值只把「下一个 PII 标签 / 竖线 / 换行 / 句读」当作终止边界，因此 `姓名 张三 课程编号 QM-CS201 学分 3 学期 2026-2027-1` 会把**整行**当作姓名值吞掉（输出直接变成 `姓名：[REDACTED_NAME]`），学号行同理；`姓名：张 三 课程名称：数据结构 学分：3` 还会连带删掉「课程名称」并留下孤立冒号。
 - **修复方案（稳定的字段边界策略）**：新增 `_FIELD_BOUNDARY_LABELS`，把常见的普通字段名识别为边界 —— 课程编号 / 课程代码 / 课程名称 / 课程类别 / 课程性质、学分 / 学期 / 成绩 / 绩点、专业 / 年级 / 班级 / 学院 / 培养层次、日期 / 时间 / 地点 / 教室 / 校区、状态 / 类型 / 备注 / 说明；并新增 `_GENERIC_KEY_BOUNDARY`，把任意「字段名 + 冒号或等号」也视为边界。这些字段**只用于截断 PII 值，自身永不被清洗**。
 - **真实长度上限**：`_VALUE` 由「无界重复」改为**双重硬上限**（单 token ≤ `_VALUE_TOKEN_MAX_CHARS`=48 字符，token 数 ≤ 1+`_VALUE_EXTRA_TOKENS`=5），并导出 `MAX_FIELD_VALUE_CHARS`=240 供测试校验，杜绝「名为有界、实为无界」。PII 值在下一个字段开始前停止，**不吞掉字段间空白**与后续字段。
 - **版本与指纹影响**：`PRIVACY_POLICY_VERSION` 由 `external-privacy-v2` 提升为 **`external-privacy-v3`**（外发文本语义再次变化）。API Embedding descriptor 携带该版本 ⇒ `embedding_fingerprint` 变化并**按既有机制触发 API 向量重建**；Local / Fake Embedding 仍为 `None` 且不进入 `as_dict()` ⇒ 指纹与 `pipeline_fingerprint` 逐字节不变；Reranker 记录该版本但**仍不进入** `pipeline_fingerprint`，**不触发任何文档索引重建**。
 - **兼容性**：上一轮 8 种键值格式、TAB / 表格竖线、带内部空格的姓名、固定电话、幂等性、确定性、离线与「只清洗外发副本」全部继续成立；`3d3710b` 的空 Embedding readiness 修复未被破坏（空输入仍为 no-op）。
 - **验收**：`docker compose exec backend pytest` → **348 passed**（修复前 338）；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、日志隐私泄漏扫描全部符合预期。
+- **资源保护**：默认 backend 镜像仍无 torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；未下载模型、未运行真实模型、未安装新依赖、未访问真实外部 API。
+- **边界**：默认 Local 环境仍为 `degraded`（`embedding.ready=false`、`reranker.ready=false`、`chat=unconfigured`、`planning=unavailable`）。阶段 6 仍未开始。
+
+### 阶段 5 Unicode 隐私格式收尾（BUG-5-06 / external-privacy-v4）
+
+阶段 5 仍为 `completed`；**未开始阶段 6**。
+
+- **隐私清洗策略版本状态**：`external-privacy-v1` / `v2` / `v3` 均为**历史版本**；**当前有效版本为 `external-privacy-v4`**（`PRIVACY_POLICY_VERSION`）。上文各修复小节中的 v2 / v3 均为当时的版本记录，不代表当前值。
+- 输出：`backend/app/core/privacy.py`（策略 v4）、`backend/tests/test_stage5_fixes.py`（新增 8 项 Unicode 回归）。未新增依赖、未改数据库 schema、未改 Compose 结构、未改动两个 API Provider 的调用点（继续共用同一个 `privacy.py`）。
+- **BUG-5-06（Unicode 横向空白 / 全角标点未覆盖）**：v3 的分隔符、字段值与电话规则只认 ASCII 空格 / TAB 与 ASCII 括号 / 连字符，因此 `姓名　张三`（U+3000 全角空格）、`姓名 张三`（U+00A0 NBSP）、`学号　20260001` 完全不生效；`电话：（010）12345678`（全角括号）、`电话：010－12345678`（全角连字符）、`电话：010–12345678`（en dash）与 `电话 010  12345678`（连续空格）也都不会被识别 —— 个人信息会原样发给外部模型。
+- **修复方案**：新增 `_HSPACE_CHARS`（空格 / TAB / NBSP / Ogham 空格 / U+2000–U+200A / U+202F / U+205F / U+3000），并让**标签**（`姓…名`、`学…号`）、**键值分隔符**、**字段边界**、**`_GENERIC_KEY_BOUNDARY`** 与**值内连接符**统一使用它；`_HYPHEN_CHARS` 覆盖 ASCII 连字符 / 全角连字符 / en dash / em dash，`_OPEN_PAREN`/`_CLOSE_PAREN` 覆盖 ASCII 与全角括号，`_PHONE_GAP` 允许区号与号码之间**一个或多个横向空白或连接符**。
+- **不跨行保证**：`_HSPACE_CHARS` 刻意**不含** CR、LF、VT、FF 与 U+2028 / U+2029，且字段值字符类排除 `\s`，因此 Unicode 空白匹配**绝不把下一行吞入当前字段**（有专门回归测试）。
+- **版本与指纹影响**：版本提升为 **`external-privacy-v4`** ⇒ API Embedding `embedding_fingerprint` 改变（与 v1 / v2 / v3 均不同）并按既有机制**触发 API 向量重建**；Local / Fake Embedding 该字段为 `None` ⇒ 指纹与 `pipeline_fingerprint` **逐字节不变**；Reranker 仍**不进入** `pipeline_fingerprint`，**不触发任何文档索引重建**。
+- **兼容性**：v2 的 8 种键值格式、v3 的混合字段边界与 `MAX_FIELD_VALUE_CHARS` 真实长度上限、`3d3710b` 的空 Embedding readiness no-op 全部无回归；确定性、幂等、离线、无 NER、无新依赖、只清洗外发副本全部继续成立。
+- **验收**：`docker compose exec backend pytest` → **356 passed**（修复前 348）；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、`ps`、`/api/health`、日志隐私泄漏扫描全部符合预期。
 - **资源保护**：默认 backend 镜像仍无 torch / sentence-transformers，镜像内无模型权重、无 `/app/data`、无 Hugging Face 缓存；`./data/models` 仍为空；未下载模型、未运行真实模型、未安装新依赖、未访问真实外部 API。
 - **边界**：默认 Local 环境仍为 `degraded`（`embedding.ready=false`、`reranker.ready=false`、`chat=unconfigured`、`planning=unavailable`）。阶段 6 仍未开始。
 

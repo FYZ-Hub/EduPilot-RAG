@@ -822,10 +822,10 @@ def test_privacy_scrub_is_idempotent_for_mixed_academic_lines() -> None:
         assert scrub(once) == once
 
 
-def test_privacy_policy_version_is_v3() -> None:
+def test_privacy_policy_version_is_v4() -> None:
     from app.core.privacy import PRIVACY_POLICY_VERSION
 
-    assert PRIVACY_POLICY_VERSION == "external-privacy-v3"
+    assert PRIVACY_POLICY_VERSION == "external-privacy-v4"
 
 
 def test_privacy_v3_bumps_only_api_embedding_fingerprint(tmp_path) -> None:
@@ -897,5 +897,149 @@ def test_api_embedding_preserves_academic_context_before_send(tmp_path, monkeypa
         MIXED_NAME_EXPECTED,
         MIXED_STUDENT_ID_EXPECTED,
         MIXED_SPACED_NAME_EXPECTED,
+    ]
+    assert texts == snapshot, "调用方持有的文本不得被改写"
+
+
+# ============================================================================
+# BUG-5-06：Unicode 横向空白 / 全角标点的隐私格式收尾
+# ============================================================================
+
+IDEOGRAPHIC_SPACE = "\u3000"  # 全角空格
+NBSP = "\u00a0"  # 不换行空格
+
+UNICODE_FORMAT_SAMPLES = [
+    (f"姓名{IDEOGRAPHIC_SPACE}张三", "姓名：[REDACTED_NAME]"),
+    (f"学号{IDEOGRAPHIC_SPACE}20260001", "学号：[REDACTED_STUDENT_ID]"),
+    (f"姓名{NBSP}张三", "姓名：[REDACTED_NAME]"),
+    ("电话：（010）12345678", "电话：[REDACTED_PHONE]"),
+    ("电话：010－12345678", "电话：[REDACTED_PHONE]"),
+    ("电话：010–12345678", "电话：[REDACTED_PHONE]"),
+    ("电话 010  12345678", "电话：[REDACTED_PHONE]"),
+]
+
+UNICODE_LEAK_TOKENS = ("张三", "20260001", "12345678", "010）", "010－", "010–")
+
+UNICODE_MIXED_LINE = (
+    f"姓名{IDEOGRAPHIC_SPACE}张三 学号{NBSP}20260001 电话：（010）12345678 "
+    "课程编号 QM-CS201 课程名称 数据结构 学分 3 学期 2026-2027-1 成绩 88"
+)
+UNICODE_MIXED_EXPECTED = (
+    "姓名：[REDACTED_NAME] 学号：[REDACTED_STUDENT_ID] 电话：[REDACTED_PHONE] "
+    "课程编号 QM-CS201 课程名称 数据结构 学分 3 学期 2026-2027-1 成绩 88"
+)
+
+
+def test_privacy_scrub_handles_unicode_horizontal_whitespace() -> None:
+    from app.core.privacy import scrub
+
+    for raw, expected in UNICODE_FORMAT_SAMPLES:
+        assert scrub(raw) == expected, f"Unicode 格式未清洗：{raw!r}"
+
+
+def test_privacy_scrub_removes_pii_in_unicode_formats() -> None:
+    from app.core.privacy import scrub
+
+    for raw, expected in UNICODE_FORMAT_SAMPLES:
+        result = scrub(raw)
+        assert result == expected
+        for leaked in UNICODE_LEAK_TOKENS:
+            assert leaked not in result, f"{leaked!r} 仍残留：{raw!r}"
+
+
+def test_privacy_scrub_does_not_cross_lines_with_unicode_whitespace() -> None:
+    """Unicode 横向空白匹配不得跨越 CR/LF，不能把下一行吞入当前字段。"""
+    from app.core.privacy import REDACTED_NAME, REDACTED_STUDENT_ID, scrub
+
+    raw = f"姓名{IDEOGRAPHIC_SPACE}张三\n学号{NBSP}20260001"
+    result = scrub(raw)
+    assert result == "姓名：[REDACTED_NAME]\n学号：[REDACTED_STUDENT_ID]"
+    assert REDACTED_NAME in result
+    assert REDACTED_STUDENT_ID in result
+
+    with_crlf = f"姓名{IDEOGRAPHIC_SPACE}张三\r\n课程编号 QM-CS201"
+    assert scrub(with_crlf) == "姓名：[REDACTED_NAME]\r\n课程编号 QM-CS201"
+
+
+def test_privacy_scrub_unicode_formats_are_idempotent() -> None:
+    from app.core.privacy import scrub
+
+    for raw, _expected in UNICODE_FORMAT_SAMPLES:
+        once = scrub(raw)
+        assert scrub(once) == once
+
+
+def test_privacy_scrub_keeps_academic_tokens_with_unicode_separators() -> None:
+    from app.core.privacy import scrub
+
+    result = scrub(UNICODE_MIXED_LINE)
+    assert result == UNICODE_MIXED_EXPECTED
+    for token in ("QM-CS201", "课程名称", "数据结构", "学分", "学期", "成绩"):
+        assert token in result, f"学术字段被误删：{token}"
+
+
+def test_privacy_v4_bumps_only_api_embedding_fingerprint(tmp_path) -> None:
+    from app.core.privacy import PRIVACY_POLICY_VERSION
+    from app.embedding.base import EmbeddingDescriptor
+
+    api = embedding_descriptor_for(_api_embedding_settings(tmp_path))
+    assert api.privacy_policy_version == PRIVACY_POLICY_VERSION
+    assert PRIVACY_POLICY_VERSION == "external-privacy-v4"
+
+    for previous in ("external-privacy-v1", "external-privacy-v2", "external-privacy-v3"):
+        baseline = EmbeddingDescriptor(
+            provider="api",
+            model=api.model,
+            revision="api",
+            dimension=api.dimension,
+            privacy_policy_version=previous,
+        )
+        assert api.fingerprint != baseline.fingerprint, f"v4 必须与 {previous} 不同"
+
+    for provider in ("fake", "local"):
+        descriptor = embedding_descriptor_for(build_settings(tmp_path, embedding_provider=provider))
+        assert descriptor.privacy_policy_version is None
+        assert "privacy_policy_version" not in descriptor.as_dict()
+
+
+def test_api_reranker_scrubs_unicode_formats_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.rerank.api", _rerank_response)
+    provider = ApiReranker(_api_rerank_settings(tmp_path))
+
+    documents = [raw for raw, _ in UNICODE_FORMAT_SAMPLES]
+    snapshot = list(documents)
+    provider.rerank(UNICODE_MIXED_LINE, documents)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in UNICODE_LEAK_TOKENS:
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    for placeholder in ("[REDACTED_NAME]", "[REDACTED_STUDENT_ID]", "[REDACTED_PHONE]"):
+        assert placeholder in serialized
+    for token in ("QM-CS201", "课程名称", "数据结构", "学分", "学期", "成绩"):
+        assert token in serialized, f"外发 payload 丢失学术字段：{token}"
+    assert captured[0]["query"] == UNICODE_MIXED_EXPECTED
+    assert captured[0]["documents"] == [expected for _, expected in UNICODE_FORMAT_SAMPLES]
+    assert documents == snapshot, "调用方持有的候选文本不得被改写"
+
+
+def test_api_embedding_scrubs_unicode_formats_before_send(tmp_path, monkeypatch) -> None:
+    captured = _capture_requests(monkeypatch, "app.embedding.api", _embedding_response)
+    provider = ApiEmbeddingProvider(_api_embedding_settings(tmp_path))
+
+    texts = [UNICODE_MIXED_LINE] + [raw for raw, _ in UNICODE_FORMAT_SAMPLES]
+    snapshot = list(texts)
+    provider.embed_documents(texts)
+
+    serialized = json.dumps(captured[0], ensure_ascii=False)
+    for leaked in UNICODE_LEAK_TOKENS:
+        assert leaked not in serialized, f"外发 payload 仍包含个人信息：{leaked}"
+    for placeholder in ("[REDACTED_NAME]", "[REDACTED_STUDENT_ID]", "[REDACTED_PHONE]"):
+        assert placeholder in serialized
+    for token in ("QM-CS201", "课程名称", "数据结构", "学分", "学期", "成绩"):
+        assert token in serialized, f"外发 payload 丢失学术字段：{token}"
+    # Embedding 会按 batch_size 分批：把所有批次的 input 按顺序拼接后校验
+    sent = [text for payload in captured for text in payload["input"]]
+    assert sent == [UNICODE_MIXED_EXPECTED] + [
+        expected for _, expected in UNICODE_FORMAT_SAMPLES
     ]
     assert texts == snapshot, "调用方持有的文本不得被改写"
