@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 4 已完成（FTS5、混合检索与演示数据集原子激活）**
-- 下一阶段：**阶段 5 — Reranker**
+- 当前阶段：**阶段 5 已完成（Reranker）**
+- 下一阶段：**阶段 6 — SSE 问答与引用**
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -15,7 +15,7 @@
 | 2 | 模拟语料、上传与解析 | completed |
 | 3 | 语义切片与 Chroma | completed |
 | 4 | FTS5 与混合检索 | completed |
-| 5 | Reranker | not_started |
+| 5 | Reranker | completed |
 | 6 | SSE 问答与引用 | not_started |
 | 7 | 确定性学分规则引擎 | not_started |
 | 8 | Vue 核心页面 | not_started |
@@ -69,6 +69,23 @@
 - 验收命令：`docker compose build backend`、`docker compose up -d`、`docker compose exec backend pytest`（112 passed）、`docker run --rm --network none ... python -m pytest scripts`（72 passed）、`docker compose exec frontend pnpm test`（11 passed）、`docker compose exec frontend pnpm build`、`docker compose config`、`docker compose ps`、`Invoke-RestMethod http://localhost:8000/api/health`、`docker compose logs --no-color --tail 200`。
 - **边界**：本阶段 `target_stage` 仅为 `parsed`。15 份资料**仅达到 parsed**，`loaded` 始终为 `false`，`active_dataset_version` 为 `null`，`ready_documents=0`，`retrievable=false`；**未建立向量或 FTS 索引**，**未进入可检索知识库**，未写入 active demo dataset 指针。`/api/health` 继续 `degraded`，embedding/reranker `ready=false`，`chat=unconfigured`，`planning=unavailable`。演示 job 的 `completed` 只表示达到本任务 `target_stage=parsed`。
 
+## 阶段 5 结论（Reranker）
+
+- 输出：`backend/app/rerank/`（`base.py` 描述符与统一接口、`fake.py` / `local.py` / `api.py` 三个 Provider、`factory.py` 工厂）、`backend/app/runtime/coordinator.py`（进程级本地模型协调器）、`backend/app/search/reranking.py`（`RerankingRetriever` 重排层）、`app/search/types.py` 的 `RerankedResult` 与 `RerankDiagnostics`；新增测试 `test_rerank_provider.py`、`test_reranking_pipeline.py`、`test_model_coordinator.py`、`test_rerank_health.py`。
+- **无新增第三方依赖**：Local Reranker 复用阶段 3 已固定的可选依赖清单 `backend/requirements-embedding-local.txt`（sentence-transformers / transformers / torch），默认镜像继续保持轻量。
+- **Provider 契约**：输入只有 `query` 与按稳定顺序排列的候选文本，输出必须是与输入一一对应的有限浮点分数；Provider **不得**生成或重建 `chunk_id`、引用、locator 或业务元数据，因此重排不会让分数与引用错位。
+- **FakeReranker**：完全离线；分数由 `(query, candidate_text)` 的 SHA-256 派生（**不使用 `hash()`**），同一输入在同进程、跨进程与任意 `PYTHONHASHSEED` 下完全一致，逐条与批量结果一致；不访问网络、不读取模型缓存、不导入 torch。`production` / `prod` 由工厂拒绝（`RERANK_PROVIDER_FORBIDDEN`）。
+- **LocalReranker**：`BAAI/bge-reranker-v2-m3`，revision 固定为 Hugging Face 快照 **`953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e`**（2024-06-24，Apache-2.0，已核对官方模型 API），绝不跟随可变 `main`；构造与健康检查都不导入 torch / 不加载模型；首次真实调用才延迟导入、延迟加载；`local_files_only=true`、`trust_remote_code=false`、`cache_dir` 显式使用 `MODEL_CACHE_PATH`（`/app/data/models`，**不使用宿主机默认 Hugging Face 缓存**）、固定 `max_length=1024`、`eval()` + `torch.no_grad()`、默认 `device=cpu` / `batch_size=2`（GPU Profile 覆盖为 `cuda` / `4`）。缺依赖、缺权重、CUDA 不可用或推理 OOM 一律返回安全的 `RERANK_PROVIDER_UNAVAILABLE`，**绝不静默回退 CPU、API 或 Fake**。
+- **ApiReranker**：内部约定的 `POST {RERANK_BASE_URL}/rerank`，请求 `{model, query, documents, top_n}`、响应 `{results:[{index, relevance_score}]}`；Bearer 认证与显式 `RERANK_TIMEOUT_SECONDS`；`index` 必须唯一、完整、在范围内，服务端乱序时按 `index` 正确映射回输入；`relevance_score` 必须有限；只发送 query 与候选片段，错误与日志不泄漏 API Key、Base URL、请求/响应正文或候选全文。**`loaded` 恒为 `false`**：未做连通性探测前不得仅凭配置声称远端可用。基础测试仅使用 httpx mock，不访问真实 API。
+- **重排管线**：`HybridRetriever` 保持纯粹的 Dense + Keyword + RRF（阶段 4 的「不执行 Reranker」测试原样保留、未改写）；新增独立 `RerankingRetriever`：RRF 顺序 → 取最多 **`RERANK_MAX_CANDIDATES=20`** 条候选 → 打分 → 稳定排序 → 输出前 **`RERANK_TOP_K=6`** 条。空候选不调用 Provider；候选少于 6 条时只返回实际数量。排序固定为「`rerank_score` 降序 → `fused_score` 降序 → `chunk_id` 升序」，不使用 `hash()`、随机数、UUID、时间或不稳定遍历顺序。
+- **非法输出与降级边界**：分数数量不一致、NaN / Infinity、非数值、API index 重复/缺失/越界、非法 JSON、非法结构一律抛出 `RERANK_RESPONSE_INVALID`（内部不变量错误，**不降级吞掉**）；只有「Provider 明确不可用 / API 超时 / 协调器忙」才安全降级为原 RRF 顺序前 6 条，且必须 `rerank_applied=false`、`rerank_score=null`、记录白名单化的稳定 `degraded_reason`，**绝不把 `fused_score` 冒充 `rerank_score`**，health 也不会因此把 Reranker 标记为 ready。
+- **指纹边界**：`RerankDescriptor`（provider / model / revision / implementation_version / score_kind / max_length）生成稳定的 `reranker_fingerprint` 并进入安全诊断，但**不进入** `documents/fingerprint.py` 的 `pipeline_fingerprint`、**不增加** `DocumentPipelineState` 检查点、不触发 SQLite / Chroma / FTS 重建、不改变 active dataset、不改变 demo `loaded` 状态、不触发重新 seed（已有回归测试证明「只改 Reranker 配置不会改变文档流水线指纹」与「重排不写任何索引」）。
+- **显存/内存协调**：新增进程级共享 `LocalModelCoordinator`，worker Embedding、Dense 查询 Embedding 与 Local Reranker 三者共用同一有界互斥（默认 30s 有界等待，超时抛安全错误，**不允许无限等待**）。任何时刻最多只有一个本地大模型驻留；每个使用窗口在 `finally` 中释放，异常/超时/取消路径同样释放；应用关闭时 `reranker.close()` + `coordinator.close()` 幂等释放。`close/release` 不会为了清理而导入 torch：`empty_cuda_cache` 只在 torch **已加载且确实使用 CUDA** 时才清理。并发测试证明 Embedding 与 Reranker 的最大同时驻留数为 1。
+- **诊断与健康**：`RerankDiagnostics` 在阶段 4 安全统计之上增加 `rerank_input_candidates`、`reranked_candidates`、`rerank_elapsed_ms`、`rerank_applied`、`reranker_provider`、`reranker_revision`、`reranker_fingerprint`、`rerank_score_kind`、`degraded_reason`、`rrf_version`；不包含 API Key、Base URL、query 原文、chunk 正文、绝对路径或完整外部响应。`/api/health` 不再固定 `reranker.ready=false`，改为读取 Provider **真实**的 `loaded`：Fake 为 true（离线确实可用），默认 Local 在未安装依赖/未放置权重时为 false，API 在未探测时为 false；健康检查本身不加载模型、不访问网络、不下载权重。整体仍为 `degraded`，`chat=unconfigured`、`planning=unavailable`，`documents` 仍只由可检索文档决定。
+- **验收**：`docker compose exec backend pytest` → **301 passed**（阶段 4 为 243）；Reranker Provider 定向离线执行 `docker run --rm --network none campus-rag-backend:0.1.0 python -m pytest tests/test_rerank_provider.py -q` → **25 passed**；生成器 `--network none` → **72 passed**；前端 `pnpm test` → **11 passed**、`pnpm build` 成功；`docker compose config --quiet`、GPU 合并 `config`（`EMBEDDING_DEVICE=cuda`、`RERANK_DEVICE=cuda`、批次 8/4、`gpus`、`profiles`）、`ps`、`/api/health`、`logs` 全部符合预期。
+- **资源保护**：默认 backend 镜像**未**新增 torch / sentence-transformers（镜像内 `find_spec` 均为 `None`），镜像内**没有**模型权重、`/app/data`、`/app/models`，也**没有**产生 Hugging Face 缓存（`/root/.cache` 不存在）；本轮**未下载任何模型权重、未运行真实模型、未启动 GPU Profile**。`./data/models` 仍为空。
+- **边界**：阶段 5 只实现 Reranker 与查询时重排层，不含 Chat / SSE、LLM 调用、问题改写、答案生成、引用流、学分计算、前端业务页面与阶段 9 评测；未新增规范外的公共搜索或调试 API。**代码路径与 mock 已验证，但真实权重未下载、真实 Local 模型未运行**，因此默认 Local 环境的 `reranker.ready` 仍为 `false`。
+
 ## 阶段 4 结论（FTS5、混合检索与演示数据集原子激活）
 
 - 输出：`backend/app/search/`（`schema.py` FTS5 结构、`text.py` 确定性中文规范化与安全 MATCH 构造、`fts.py` 索引写入与精确对账、`eligibility.py` 可检索资格、`hydrate.py` 候选补全、`keyword.py` / `dense.py` / `hybrid.py` 三路检索）、`backend/app/demo/activation.py`（原子激活与退役）、`backend/app/api/retrieval.py`（`/api/sources/{chunk_id}`、`/api/retrieval/options`）、`backend/app/documents/categories.py`（类别中文标签）；`document_chunks.fts_rowid`、`demo_active_dataset.active_marker`；新增测试 `test_fts_index.py`、`test_keyword_retriever.py`、`test_retrieval_hybrid.py`、`test_reconciliation.py`、`test_activation.py`、`test_sources_api.py`。
@@ -112,7 +129,7 @@
 ## 备注
 
 - 本文件仅用于阶段状态跟踪；业务实现、构建与测试均在 Docker 容器内执行。
-- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 固化模拟语料；阶段 2B 完成上传、解析与异步初始化；阶段 3 完成切片与向量索引；阶段 4 完成 FTS5、Dense/Keyword/RRF 混合检索、`completed` 检查点、三方对账与 demo 数据集原子激活。至此 15 份资料在**隔离 Fake 环境**中已进入可检索知识库（`loaded=true`）。
-- **默认 Local 环境仍未加载任何模型、未下载权重、未激活数据集**：`loaded=false`、`retrievable` 计数为 0。切换 Provider 必须按新 `pipeline_fingerprint` 重建向量与 FTS，**不得复用 Fake 索引**。
+- 阶段 1 未实现任何 RAG、解析、检索、学分能力；阶段 2A 固化模拟语料；阶段 2B 完成上传、解析与异步初始化；阶段 3 完成切片与向量索引；阶段 4 完成 FTS5、Dense/Keyword/RRF 混合检索、`completed` 检查点、三方对账与 demo 数据集原子激活；阶段 5 完成 Reranker（fake / local / api 三条 Provider 路径）与查询时重排层。至此 15 份资料在**隔离 Fake 环境**中已进入可检索知识库（`loaded=true`），并可在其上执行 RRF → 重排 → 前 6 条引用结果。
+- **默认 Local 环境仍未加载任何模型、未下载权重、未激活数据集**：`loaded=false`、`retrievable` 计数为 0、`embedding.ready=false`、`reranker.ready=false`。切换 Provider 必须按新 `pipeline_fingerprint` 重建向量与 FTS，**不得复用 Fake 索引**；Reranker 配置变化**不**影响该指纹。
 - 语料生成/校验固定命令：在 `campus-rag-generator:1.0.0` 镜像内以 `--network none` 执行 `python scripts/generate_demo_corpus.py --output <dir> --seed 20260925`；固化到 `demo/` 必须显式追加 `--publish demo`。
-- 阶段 5 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/PRODUCT_SPEC.md` 实现 Reranker（本阶段未开始），其输入即本阶段 `HybridRetriever` 的候选结果。
+- 阶段 6 须按 `docs/IMPLEMENTATION_PLAN.md` 与 `docs/PRODUCT_SPEC.md` 实现 SSE 问答与引用（本阶段未开始），其输入即本阶段重排后的前 4–6 条证据。

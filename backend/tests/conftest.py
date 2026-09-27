@@ -17,6 +17,7 @@ from app.db import create_db_engine, create_session_factory, init_database
 from app.embedding.base import descriptor_for
 from app.embedding.factory import build_embedding_provider
 from app.main import create_app
+from app.rerank.factory import build_rerank_provider
 from app.vector.store import ChromaVectorStore
 from app.worker.runner import Worker
 
@@ -28,7 +29,8 @@ DEMO_MANIFEST_PATH = DEMO_DATASET_PATH / "manifest.json"
 def build_settings(tmp_path: Path, **overrides) -> Settings:
     """构造隔离的测试配置：临时数据库、临时上传/Chroma 目录、Fake Provider、关闭后台线程。
 
-    全部阶段 3 测试只使用 FakeEmbeddingProvider：不访问网络、不下载模型、不依赖 GPU。
+    全部自动化测试只使用 FakeEmbeddingProvider 与 FakeReranker：
+    不访问网络、不下载模型、不依赖 GPU。
     """
     values: dict = {
         "app_env": "test",
@@ -40,6 +42,7 @@ def build_settings(tmp_path: Path, **overrides) -> Settings:
         "demo_dataset_path": str(DEMO_DATASET_PATH),
         "demo_dataset_version": "2026.1",
         "embedding_provider": "fake",
+        "rerank_provider": "fake",
         "worker_enabled": False,
         "worker_poll_seconds": 0.05,
         "demo_job_poll_seconds": 1,
@@ -89,6 +92,14 @@ def embeddings(settings):
 
 
 @pytest.fixture
+def reranker(worker, settings):
+    """Fake Reranker：确定性、离线，与 worker 共用同一协调器。"""
+    provider = build_rerank_provider(settings, worker.coordinator)
+    yield provider
+    provider.close()
+
+
+@pytest.fixture
 def vectors(settings):
     """隔离的临时 Chroma 目录，不污染正式 data/。"""
     store = ChromaVectorStore(settings, descriptor_for(settings))
@@ -118,13 +129,14 @@ def ingest_demo(context, worker):
 
 
 @pytest.fixture
-def search(context, worker):
+def search(context, worker, reranker):
     """检索入口；每个调用使用独立短事务，返回脱离会话的数据类结果。"""
     from types import SimpleNamespace
 
     from app.search.dense import DenseRetriever
     from app.search.hybrid import HybridRetriever
     from app.search.keyword import KeywordRetriever
+    from app.search.reranking import RerankingRetriever
 
     def _keyword(query, filters=None, top_k=None):
         with context.session_factory() as session:
@@ -133,16 +145,29 @@ def search(context, worker):
     def _dense(query, filters=None, top_k=None):
         with context.session_factory() as session:
             return DenseRetriever(
-                session, context.settings, worker.vectors, worker.embeddings
+                session, context.settings, worker.vectors, worker.embeddings, worker.coordinator
             ).search(query, filters, top_k)
 
     def _hybrid(query, filters=None, top_k=None):
         with context.session_factory() as session:
             return HybridRetriever(
-                session, context.settings, worker.vectors, worker.embeddings
+                session, context.settings, worker.vectors, worker.embeddings, worker.coordinator
             ).search(query, filters, top_k)
 
-    return SimpleNamespace(keyword=_keyword, dense=_dense, hybrid=_hybrid)
+    def _rerank(query, filters=None, top_k=None, reranker_override=None):
+        with context.session_factory() as session:
+            return RerankingRetriever(
+                session,
+                context.settings,
+                worker.vectors,
+                worker.embeddings,
+                reranker_override or reranker,
+                worker.coordinator,
+            ).search(query, filters, top_k)
+
+    return SimpleNamespace(
+        keyword=_keyword, dense=_dense, hybrid=_hybrid, rerank=_rerank
+    )
 
 
 @pytest.fixture

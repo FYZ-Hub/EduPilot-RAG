@@ -14,6 +14,7 @@ from sqlalchemy.orm import Session
 from app.config import Settings
 from app.documents.fingerprint import VECTOR_SCHEMA_VERSION
 from app.embedding.base import EmbeddingProvider
+from app.runtime.coordinator import LocalModelCoordinator
 from app.search.dense import DenseRetriever
 from app.search.hydrate import build_scope
 from app.search.keyword import KeywordRetriever
@@ -83,11 +84,13 @@ class HybridRetriever:
         settings: Settings,
         vectors: ChromaVectorStore,
         embeddings: EmbeddingProvider,
+        coordinator: LocalModelCoordinator | None = None,
     ):
         self.session = session
         self.settings = settings
         self.vectors = vectors
         self.embeddings = embeddings
+        self.coordinator = coordinator
 
     def search(
         self,
@@ -99,7 +102,7 @@ class HybridRetriever:
         started = time.perf_counter()
 
         dense = DenseRetriever(
-            self.session, self.settings, self.vectors, self.embeddings
+            self.session, self.settings, self.vectors, self.embeddings, self.coordinator
         ).search(query, filters)
         keyword, match_mode = KeywordRetriever(self.session, self.settings).search(
             query, filters

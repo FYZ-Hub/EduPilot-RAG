@@ -22,11 +22,13 @@ def test_health_reports_degraded_without_business_features(client: TestClient) -
     assert isinstance(payload["version"], str) and payload["version"]
 
 
-def test_health_reports_provider_devices_and_not_ready(client: TestClient) -> None:
+def test_health_reports_provider_devices_and_readiness(client: TestClient) -> None:
     providers = client.get("/api/health").json()["providers"]
 
+    # Fake Embedding 不加载任何模型，因此永远不谎报 ready
     assert providers["embedding"] == {"provider": "fake", "device": "cpu", "ready": False}
-    assert providers["reranker"] == {"provider": "local", "device": "cpu", "ready": False}
+    # 测试环境使用 Fake Reranker：它确实离线可用，因此真实 ready 为 True
+    assert providers["reranker"] == {"provider": "fake", "device": "cpu", "ready": True}
     assert providers["llm"]["device"] is None
     assert providers["llm"]["ready"] is False
 

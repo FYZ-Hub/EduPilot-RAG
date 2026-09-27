@@ -3,8 +3,9 @@
 日志只记录 job id、doc id、阶段与错误码，不记录正文、隐私信息、密钥或宿主机路径。
 同一进程内绝不嵌套写事务：每个阶段使用独立的短事务。
 
-阶段 3 的文档路径：
-``parsed → chunked → embedding（非独立检查点） → Chroma upsert → Chroma 对账 → vector_indexed``
+当前文档路径：
+``parsed → chunked → embedding（非独立检查点） → Chroma upsert → Chroma 对账 → vector_indexed
+→ FTS 写入与对账 → keyword_indexed → 三方对账 → completed``
 SQLite 与 Chroma 无法组成事务，因此用「确定性 chunk_id + upsert + 指纹 + 集合对账」
 保证至少一次执行产生恰好一次的数据效果。
 """
@@ -71,6 +72,7 @@ from app.models import (
     utcnow,
 )
 from app.search import fts as fts_index
+from app.runtime.coordinator import LocalModelCoordinator, embedding_lease
 from app.vector.store import ChromaVectorStore, VectorRecord
 from app.worker.lock import acquire_process_lock, default_lock_path
 
@@ -158,12 +160,16 @@ class Worker:
         settings: Settings,
         session_factory: sessionmaker[Session],
         worker_id: str | None = None,
+        coordinator: LocalModelCoordinator | None = None,
     ):
         self.settings = settings
         self.session_factory = session_factory
         self.worker_id = worker_id or f"worker-{uuid.uuid4().hex[:12]}"
         self.descriptor = descriptor_for(settings)
-        self.embeddings = build_embedding_provider(settings)
+        # 本地 Embedding 与 Local Reranker 共用同一进程级协调器：
+        # worker Embedding 与查询侧 Embedding / Reranker 不会同时驻留。
+        self.coordinator = coordinator or LocalModelCoordinator()
+        self.embeddings = build_embedding_provider(settings, self.coordinator)
         self.vectors = ChromaVectorStore(settings, self.descriptor)
         self._stop = threading.Event()
         self._thread: threading.Thread | None = None
@@ -1003,18 +1009,21 @@ class Worker:
                 reused,
             )
 
-        for batch in _batched(pending, self.settings.embedding_batch_size):
-            texts = [text_by_id[chunk_id] for chunk_id in batch]
-            vectors = self._executor.submit(self.embeddings.embed_documents, texts).result()
-            records = [
-                VectorRecord(
-                    chunk_id=chunk_id,
-                    text=text_by_id[chunk_id],
-                    metadata=metadata_by_id[chunk_id],
-                )
-                for chunk_id in batch
-            ]
-            self.vectors.upsert(records, vectors)
+        # 整个文档的批量 Embedding 共用一个有界窗口：窗口内模型只加载一次，
+        # 窗口结束（含异常）即释放，保证与 Local Reranker 不会同时驻留。
+        with embedding_lease(self.coordinator):
+            for batch in _batched(pending, self.settings.embedding_batch_size):
+                texts = [text_by_id[chunk_id] for chunk_id in batch]
+                vectors = self._executor.submit(self.embeddings.embed_documents, texts).result()
+                records = [
+                    VectorRecord(
+                        chunk_id=chunk_id,
+                        text=text_by_id[chunk_id],
+                        metadata=metadata_by_id[chunk_id],
+                    )
+                    for chunk_id in batch
+                ]
+                self.vectors.upsert(records, vectors)
 
         reconciled = self.vectors.vectors_for_document(document_id)
         if set(reconciled) != expected:

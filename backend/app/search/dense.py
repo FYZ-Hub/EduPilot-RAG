@@ -18,6 +18,7 @@ from app.core.errors import (
     ApiError,
 )
 from app.embedding.base import EmbeddingProvider
+from app.runtime.coordinator import LocalModelCoordinator, embedding_lease
 from app.search.hydrate import build_scope, hydrate
 from app.search.types import RetrievalFilters, RetrievedChunk
 from app.vector.store import ChromaVectorStore
@@ -49,11 +50,13 @@ class DenseRetriever:
         settings: Settings,
         vectors: ChromaVectorStore,
         embeddings: EmbeddingProvider,
+        coordinator: LocalModelCoordinator | None = None,
     ):
         self.session = session
         self.settings = settings
         self.vectors = vectors
         self.embeddings = embeddings
+        self.coordinator = coordinator
 
     def search(
         self,
@@ -106,7 +109,10 @@ class DenseRetriever:
             raise ApiError(
                 RETRIEVAL_QUERY_INVALID, details={"reason": "empty_query"}
             )
-        vector = self.embeddings.embed_documents([query])[0]
+        # 与 worker Embedding、Local Reranker 共用同一协调器：
+        # Dense 查询完成后（离开窗口）即释放 Embedding，再允许 Reranker 加载。
+        with embedding_lease(self.coordinator):
+            vector = self.embeddings.embed_documents([query])[0]
         expected = self.vectors.descriptor.dimension
         if len(vector) != expected:
             raise ApiError(

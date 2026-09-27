@@ -155,6 +155,42 @@ class HybridResult:
         return payload
 
 
+@dataclass(frozen=True)
+class RerankedResult:
+    """重排结果；引用字段直接映射自 ``HybridResult`` / ``RetrievedChunk``。
+
+    Provider 只返回分数，不返回引用：``chunk`` 始终是原样持有的检索结果，
+    因此即使重排把顺序整体逆序，``quote`` / locator / citation 也不会与分数错位。
+    """
+
+    chunk: RetrievedChunk
+    fused_score: float
+    rerank_score: float | None
+    rerank_rank: int | None
+    rerank_applied: bool = False
+    degraded_reason: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = self.chunk.citation_payload()
+        payload.update(
+            {
+                "source_type": self.chunk.source_type,
+                "source_key": self.chunk.source_key,
+                "quote": self.chunk.text,
+                "dense_rank": self.chunk.dense_rank,
+                "dense_score": self.chunk.dense_score,
+                "keyword_rank": self.chunk.keyword_rank,
+                "keyword_score": self.chunk.keyword_score,
+                "fused_score": self.fused_score,
+                "rerank_score": self.rerank_score,
+                "rerank_rank": self.rerank_rank,
+                "rerank_applied": self.rerank_applied,
+                "degraded_reason": self.degraded_reason,
+            }
+        )
+        return payload
+
+
 @dataclass
 class RetrievalDiagnostics:
     """只包含安全统计，不含密钥、绝对路径或整份正文。"""
@@ -197,10 +233,50 @@ def default_filters() -> RetrievalFilters:
     return RetrievalFilters()
 
 
+@dataclass
+class RerankDiagnostics:
+    """重排诊断：基础检索统计 + 重排统计，均为安全字段。
+
+    绝不包含 API Key、Base URL、query 原文、chunk 正文、绝对路径或完整外部响应。
+    """
+
+    retrieval: RetrievalDiagnostics = field(default_factory=RetrievalDiagnostics)
+    rerank_input_candidates: int = 0
+    reranked_candidates: int = 0
+    rerank_elapsed_ms: int = 0
+    rerank_applied: bool = False
+    reranker_provider: str | None = None
+    reranker_revision: str | None = None
+    reranker_fingerprint: str | None = None
+    rerank_score_kind: str | None = None
+    degraded_reason: str | None = None
+    rrf_version: str | None = None
+
+    def as_dict(self) -> dict[str, Any]:
+        payload = self.retrieval.as_dict()
+        payload.update(
+            {
+                "rerank_input_candidates": self.rerank_input_candidates,
+                "reranked_candidates": self.reranked_candidates,
+                "rerank_elapsed_ms": self.rerank_elapsed_ms,
+                "rerank_applied": self.rerank_applied,
+                "reranker_provider": self.reranker_provider,
+                "reranker_revision": self.reranker_revision,
+                "reranker_fingerprint": self.reranker_fingerprint,
+                "rerank_score_kind": self.rerank_score_kind,
+                "degraded_reason": self.degraded_reason,
+                "rrf_version": self.rrf_version,
+            }
+        )
+        return payload
+
+
 __all__ = [
     "ActiveDataset",
     "FILTER_FIELDS",
     "HybridResult",
+    "RerankDiagnostics",
+    "RerankedResult",
     "RetrievalDiagnostics",
     "RetrievalFilters",
     "RetrievalScope",

@@ -30,6 +30,8 @@ from app.core.errors import (
 )
 from app.core.request_id import RequestContextMiddleware, error_response, get_request_id
 from app.db import create_db_engine, create_session_factory, init_database
+from app.rerank.factory import build_rerank_provider
+from app.runtime.coordinator import LocalModelCoordinator
 from app.worker.runner import Worker
 
 _logger = logging.getLogger("app.main")
@@ -85,6 +87,9 @@ async def _lifespan(application: FastAPI):
         yield
     finally:
         context.worker.stop()
+        # Reranker 与协调器在关闭时幂等释放，确保不残留本地模型
+        context.reranker.close()
+        context.coordinator.close()
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -95,14 +100,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     engine = create_db_engine(resolved)
     init_database(engine)
     session_factory = create_session_factory(engine)
+    # 进程级共享协调器：worker Embedding、Dense 查询 Embedding 与 Local Reranker 串行复用
+    coordinator = LocalModelCoordinator()
+    reranker = build_rerank_provider(resolved, coordinator)
 
     application = FastAPI(
         title=resolved.app_name,
         version=resolved.app_version,
         lifespan=_lifespan,
     )
-    worker = Worker(resolved, session_factory)
-    # Embedding Provider 与向量库由 worker 持有，全进程复用同一实例：
+    worker = Worker(resolved, session_factory, coordinator=coordinator)
+    # Embedding Provider、向量库与 Reranker 全进程复用同一实例：
     # 构造阶段不加载模型、不下载权重、不发起网络请求。
     application.state.context = AppContext(
         settings=resolved,
@@ -111,6 +119,8 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         worker=worker,
         embeddings=worker.embeddings,
         vectors=worker.vectors,
+        coordinator=coordinator,
+        reranker=reranker,
     )
 
     # 先加请求上下文，再加 CORS，使 CORS 位于最外层（错误响应也带跨域头）

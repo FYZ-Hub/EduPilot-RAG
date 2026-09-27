@@ -32,6 +32,8 @@ services:
       RERANK_MODEL: BAAI/bge-reranker-v2-m3
       RERANK_DEVICE: cpu
       RERANK_BATCH_SIZE: "2"
+      RERANK_LOCAL_FILES_ONLY: "true"
+      RERANK_TIMEOUT_SECONDS: "30"
       # LLM：缺省未配置，服务仍可启动
       LLM_PROVIDER: openai_compatible
       LLM_TIMEOUT_SECONDS: "60"

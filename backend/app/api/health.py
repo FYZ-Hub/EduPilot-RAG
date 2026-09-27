@@ -1,8 +1,11 @@
 """健康检查路由。
 
-阶段 3 已完成确定性切片与 Chroma 向量索引，但仍缺少 FTS5 与混合检索，
-因此文档能力仍不得声明为 ready，``embedding.ready`` 也不得谎报为 true：
+阶段 5 已完成混合检索与 Reranker，但整体仍为 ``degraded``：Chat 尚未实现、
+LLM 未配置、学业规划未实现。``documents`` 能力只由“是否真的有可检索文档”决定。
+
+``embedding.ready`` / ``reranker.ready`` 只能反映 Provider **真实**的 loaded 状态：
 本地模型权重没有加载、API Provider 没有连通性探测之前，一律返回 false。
+健康检查本身不加载模型、不访问网络、不下载权重。
 """
 
 from __future__ import annotations
@@ -47,9 +50,11 @@ def read_health(
     settings: Settings = Depends(get_settings_dep),
     context: AppContext = Depends(get_context),
 ) -> HealthResponse:
-    """返回进程状态与能力信息；未接入检索前固定为 degraded。"""
+    """返回进程状态与能力信息；阶段 5 完成后整体仍为 degraded。"""
     # 只有 Provider 真的加载了模型/远端客户端才报告 ready，绝不谎报
     embedding_ready = bool(context.embeddings.loaded)
+    # Reranker 是查询时能力：读取 Provider 真实的 loaded 状态，而不是配置是否填写
+    reranker_ready = bool(context.reranker.loaded)
     # documents 能力取决于「是否真的有可检索文档」，而不是阶段编号
     retrievable = _retrievable_documents(context)
     return HealthResponse(
@@ -70,7 +75,7 @@ def read_health(
             reranker=ProviderStatus(
                 provider=settings.rerank_provider,
                 device=settings.rerank_device,
-                ready=False,
+                ready=reranker_ready,
             ),
             llm=ProviderStatus(
                 provider=settings.llm_provider,

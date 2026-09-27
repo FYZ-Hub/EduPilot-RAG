@@ -1,4 +1,4 @@
-"""FastAPI 依赖：应用上下文、会话与向量资源。"""
+"""FastAPI 依赖：应用上下文、会话与模型资源。"""
 
 from __future__ import annotations
 
@@ -11,6 +11,8 @@ from sqlalchemy.orm import Session, sessionmaker
 
 from app.config import Settings
 from app.embedding.base import EmbeddingProvider
+from app.rerank.base import RerankProvider
+from app.runtime.coordinator import LocalModelCoordinator
 from app.vector.store import ChromaVectorStore
 from app.worker.runner import Worker
 
@@ -25,6 +27,9 @@ class AppContext:
     worker: Worker
     embeddings: EmbeddingProvider
     vectors: ChromaVectorStore
+    # 本地 Embedding / 本地 Reranker 共用的进程级串行协调器
+    coordinator: LocalModelCoordinator
+    reranker: RerankProvider
 
 
 def get_context(request: Request) -> AppContext:

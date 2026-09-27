@@ -17,13 +17,18 @@ from typing import Any
 from app.config import Settings
 from app.core.errors import EMBEDDING_PROVIDER_UNAVAILABLE, ApiError
 from app.embedding.base import EmbeddingProvider, descriptor_for
+from app.runtime.coordinator import EMBEDDING_KIND, LocalModelCoordinator, empty_cuda_cache
 
 
 class LocalEmbeddingProvider(EmbeddingProvider):
-    def __init__(self, settings: Settings):
+    def __init__(self, settings: Settings, coordinator: LocalModelCoordinator | None = None):
         self.settings = settings
         self.descriptor = descriptor_for(settings)
+        self.coordinator = coordinator
         self._model: Any | None = None
+        if coordinator is not None:
+            # 由协调器在 Embedding 使用窗口结束时释放；与 Local Reranker 串行
+            coordinator.register(EMBEDDING_KIND, self.close)
 
     @property
     def loaded(self) -> bool:
@@ -72,4 +77,8 @@ class LocalEmbeddingProvider(EmbeddingProvider):
         return [[float(value) for value in vector] for vector in vectors]
 
     def close(self) -> None:
+        """释放模型引用；仅在 torch 已加载且使用 CUDA 时清理显存缓存。"""
+        if self._model is None:
+            return
         self._model = None
+        empty_cuda_cache(self.settings.embedding_device)

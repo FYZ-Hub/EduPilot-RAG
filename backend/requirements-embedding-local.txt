@@ -1,10 +1,13 @@
-# 阶段 3 可选依赖：本地 BGE-M3 Embedding Provider 的运行时环境
+# 可选依赖：本地 BGE-M3 Embedding（阶段 3）与本地 BGE Reranker（阶段 5）的运行时环境
 #
-# 默认 backend 镜像**不安装**本文件：torch 体积为数 GB，而阶段 3 的验收要求
-# “不得实际下载模型权重”，全部自动化测试使用 FakeEmbeddingProvider。
+# 默认 backend 镜像**不安装**本文件：torch 体积为数 GB，而验收要求
+# “不得实际下载模型权重”，全部自动化测试使用 FakeEmbeddingProvider / FakeReranker。
 # 只有在明确需要本地模型推理（并已把权重放入 MODEL_CACHE_PATH）时才安装：
 #
 #   pip install --no-cache-dir -r requirements-embedding-local.txt
+#
+# 阶段 5 的 LocalReranker 复用本清单，不另建第二套 torch/transformers 版本清单，
+# 避免版本漂移。
 #
 # 许可证：
 # - torch（PyTorch）：BSD-3-Clause

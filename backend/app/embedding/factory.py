@@ -13,6 +13,7 @@ from app.embedding.api import ApiEmbeddingProvider
 from app.embedding.base import EmbeddingDescriptor, EmbeddingProvider, descriptor_for
 from app.embedding.fake import FakeEmbeddingProvider
 from app.embedding.local import LocalEmbeddingProvider
+from app.runtime.coordinator import LocalModelCoordinator
 
 PRODUCTION_ENVS = frozenset({"production", "prod"})
 
@@ -21,7 +22,9 @@ def is_production(settings: Settings) -> bool:
     return settings.app_env.strip().lower() in PRODUCTION_ENVS
 
 
-def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
+def build_embedding_provider(
+    settings: Settings, coordinator: LocalModelCoordinator | None = None
+) -> EmbeddingProvider:
     """按配置构造 Provider；不加载模型、不访问网络。"""
     provider = settings.embedding_provider
     if provider == constants.EMBEDDING_PROVIDER_FAKE:
@@ -29,7 +32,7 @@ def build_embedding_provider(settings: Settings) -> EmbeddingProvider:
             raise ApiError(EMBEDDING_PROVIDER_FORBIDDEN)
         return FakeEmbeddingProvider()
     if provider == constants.EMBEDDING_PROVIDER_LOCAL:
-        return LocalEmbeddingProvider(settings)
+        return LocalEmbeddingProvider(settings, coordinator)
     if provider == constants.EMBEDDING_PROVIDER_API:
         return ApiEmbeddingProvider(settings)
     raise ApiError(EMBEDDING_PROVIDER_UNAVAILABLE, details={"reason": "unknown_provider"})

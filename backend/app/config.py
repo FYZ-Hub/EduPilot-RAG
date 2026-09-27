@@ -1,7 +1,7 @@
 """集中式应用配置。
 
 所有运行配置只在本模块读取环境变量并校验；其他模块不得直接访问 ``os.environ``。
-阶段 1 只做配置校验与健康报告，不加载、不下载任何真实模型。
+配置校验、应用构造与健康检查都不加载、不下载任何真实模型。
 """
 
 from __future__ import annotations
@@ -43,7 +43,7 @@ class Settings(BaseSettings):
     upload_path: str = "/app/data/uploads"
     model_cache_path: str = "/app/data/models"
 
-    # Embedding（阶段 1 不加载模型）
+    # Embedding（阶段 3 起使用；构造与健康检查都不加载模型）
     embedding_provider: ProviderKind = "local"
     embedding_base_url: str = ""
     embedding_api_key: str = ""
@@ -57,13 +57,18 @@ class Settings(BaseSettings):
     # 本地 Provider 默认只读缓存，不隐式下载权重（权重需预先放入 MODEL_CACHE_PATH）
     embedding_local_files_only: bool = True
 
-    # Reranker（阶段 1 不加载模型）
+    # Reranker（阶段 5 起使用；查询时能力，不产生持久索引、不进入 pipeline_fingerprint）
     rerank_provider: ProviderKind = "local"
     rerank_base_url: str = ""
     rerank_api_key: str = ""
     rerank_model: str = "BAAI/bge-reranker-v2-m3"
     rerank_device: Device = "cpu"
     rerank_batch_size: int = 2
+    # 显式模型 revision；留空时使用 Provider 内置的固定快照，绝不跟随可变 main
+    rerank_revision: str = ""
+    rerank_timeout_seconds: int = 30
+    # 本地 Provider 默认只读缓存，不隐式下载权重（权重需预先放入 MODEL_CACHE_PATH）
+    rerank_local_files_only: bool = True
 
     # LLM（缺省未配置，不阻止服务启动）
     llm_provider: str = "openai_compatible"
