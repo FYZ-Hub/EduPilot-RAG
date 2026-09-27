@@ -46,6 +46,7 @@ from app.demo.manifest import (
     sha256_file,
 )
 from app.demo.service import job_documents, mark_job_failed
+from app.academic.service import reconcile_academic_projection
 from app.documents.chunking import ChunkSourceBlock, chunk_blocks
 from app.documents.fingerprint import (
     CHUNKER_VERSION,
@@ -410,6 +411,11 @@ class Worker:
                     outcome.reason or "-",
                 )
 
+        # 阶段 7B-1：demo 任务完成后做一次幂等学业投影对账。
+        # 即使本次 seed 全部 skipped（例如升级前数据集已 active），也要补建缺失投影。
+        if status == constants.JOB_COMPLETED and activation_error is None:
+            self._reconcile_academic_projection(job_id)
+
         with session_scope(self.session_factory) as session:
             job = session.get(DemoSeedJob, job_id)
             if job is None:  # pragma: no cover
@@ -438,6 +444,24 @@ class Worker:
                 skipped,
                 failed,
             )
+
+    def _reconcile_academic_projection(self, job_id: str) -> None:
+        """幂等投影对账；失败只记录日志，绝不谎报成功，也不影响 RAG 检索结果。"""
+        try:
+            with session_scope(self.session_factory) as session:
+                report = reconcile_academic_projection(session, self.settings)
+        except Exception:  # noqa: BLE001 - 学业投影失败不得中断 demo 任务
+            logger.exception("academic_projection_failed job_id=%s", job_id)
+            return
+        logger.info(
+            "academic_projection_done job_id=%s dataset_version=%s record_sets=%s "
+            "rule_sets=%s skipped=%s",
+            job_id,
+            report.dataset_version,
+            report.record_sets,
+            report.rule_sets,
+            report.skipped,
+        )
 
     def _renew_job_lease(self, job_id: str) -> None:
         """续租：只有 owner 匹配时才更新。"""

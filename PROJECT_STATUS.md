@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 7 进行中（确定性学分规则引擎，本轮完成 7A）**
-- 下一阶段：**阶段 7B — 演示投影与 records/rules 导入**，随后 7C — 规划 API 与全量验收
+- 当前阶段：**阶段 7 进行中（7A 与 7B-1 已完成，下一步 7B-2）**
+- 下一阶段：**阶段 7B-2 — records/rules 导入接口与 GET /api/academic/options**，随后 7C — 规划 API 与全量验收
 - 最近更新：2026-09-27
 
 ## 阶段状态
@@ -69,6 +69,43 @@
 - 在**真实运行数据卷**上执行 `init_database` 验证：6 张新表已增量创建，`documents` / `document_chunks` / `demo_active_dataset` / `document_pipeline_state` 等既有表全部保留。
 - 提交内容扫描：8 个文件，无 `.env` / 数据库 / uploads / 日志 / 模型 / 缓存 / `__pycache__` / `dist`。
 - 未调用任何真实 API、未下载或加载模型、未启动 GPU Profile；默认镜像仍无 torch / sentence-transformers。
+
+### 阶段 7B-1 结论（active demo 学业资料确定性投影）
+
+阶段 7 仍为 `in_progress`。本轮只完成 **7B-1**：active demo 学业资料的确定性投影落库。
+**尚未实现** `POST /api/academic/records/import`、`POST /api/academic/rules/import`、
+`GET /api/academic/options`、`POST /api/academic/plan`；`/api/health` 的 `planning`
+仍为 `unavailable`（未改动）。
+
+**投影来源与职责边界**
+
+- 业务字段（专业、招生年份、规则版本、生效日期、毕业总学分、各类别最低学分、必修课程代码、课程目录、成绩记录）**只**从正式解析后的 `DocumentBlock` 提取；`DocumentChunk` **只**用于建立真实 `source_chunk_id`。
+- 真实块形态：成绩 XLSX 为 `table_header` + `table_row`，行文本形如 `序号: 1；课程代码: QM-CS101；…；状态: 通过`（「汇总」表无 `课程代码` 标签，被确定性排除，不会重复计分）；培养方案 PDF 无 table 块，规则来自 `heading`/`paragraph` 中的 `专业名称：…`、`招生年份：2025`、`文档版本：2025.1 生效日期：2025-09-01`、`毕业总学分：155.0 学分。`、`· 专业必修：58.0 学分` 以及课程目录行 `QM-CS102 高等数学（一） 5.0 公共必修 第1学期 无`。
+- 有回归测试证明：把全部 `document_chunks.text` 破坏后重新投影，业务字段逐项不变。
+
+**投影结果（实测）**
+
+- 2 个 record set：`匿名学生A · 课程记录`、`匿名学生B · 课程记录`；2 个 rule set：`2025.1`、`2026.1`（两个版本同时保留，**不静默选择最新**）。
+- 匿名学生A：已修 20.5 学分、在修 9.0 学分（`QM-CS102` 正考不及格 + 重修通过只计一次）；培养方案 2025.1 毕业总学分 155.0、类别最低学分 公共必修 52.0 / 专业必修 58.0 / 专业选修 20.0 / 通识选修 15.0 / 实践环节 10.0，必修代码按代码排序、类别来自课程目录。
+- 全部 `source_doc_id` / `source_chunk_id` 都是真实引用，且切片与文档同属一份文档。
+
+**原子性与幂等**
+
+- 先在内存完成并校验 4 份投影，全部通过后才在单事务内写入 6 张表；任一文档失败即整体回滚（有模拟失败回归测试证明零写入）。
+- `source_chunk_id` 映射使用固定排序：完全匹配 locator → 覆盖行范围最窄 → `chunk_index` 升序 → `chunk_id` 升序；无合法候选即明确失败，绝不伪造 ID；跨文档引用被拒绝。
+- 投影指纹覆盖「投影算法版本 + 来源文档 SHA-256 + 稳定顺序的 block 类型/文本/locator + 规范化投影内容」：指纹相同直接跳过（重复投影零新增行），指纹变化则原子替换旧投影，不继续提供陈旧规则。
+- 触发点在 demo 任务完成且激活无错时执行**幂等对账**：即使本次 seed 全部 `skipped` 也会运行，可补建升级前已 active 数据集的缺失投影；重复 seed 后各表行数不变。
+
+**隔离与隐私**
+
+- 只投影唯一 active demo dataset 中 `ready` 且可检索的文档；`source_type`/`source_key` 保持 demo 与 upload 独立所有权，upload 集合不因 demo 切换被删除或失效。
+- `source_key` 是模型内部的来源所有权字段，允许并必须落库；显示名只用安全文件名/真实提取字段推导，不含宿主绝对路径、uploads 存储路径、学号或姓名。
+
+**外键删除语义（回归修复）**
+
+- 学业表的 `source_doc_id → documents.id` 使用 `ON DELETE CASCADE`（投影随来源文档消亡）；`source_chunk_id → document_chunks.id` 使用 `ON DELETE SET NULL`（切片是来源定位而非所有权）。
+- 这是必需的：否则一旦存在学业投影，既有的文档删除 / 重新解析（会先删 `document_chunks`）就会被外键挡住，报 `FOREIGN KEY constraint failed`。已有阶段 1–7A 回归测试覆盖该路径。
+- `source_chunk_id` 保存的是**真实存在的切片 ID**，切片被置空后由下一次投影对账重建，不伪造 ID。
 
 ### 阶段 7A 修复轮（契约与冲突 warning）
 

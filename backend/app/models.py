@@ -308,9 +308,12 @@ class AcademicRecordSet(Base):
     # 内容指纹：同一来源重复导入同一内容不得无限创建重复选项
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     # 追溯：必须引用真实 Document；无法建立真实来源时不得伪造 ID
-    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
+    # 切片是「来源定位」而不是所有权：文档切片被重建/删除时只置空，不阻断既有删除流程
     source_chunk_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("document_chunks.id")
+        String(64), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -347,9 +350,11 @@ class CourseRecordRow(Base):
     status: Mapped[str] = mapped_column(String(16), nullable=False)
     semester: Mapped[str | None] = mapped_column(String(32))
     schedule: Mapped[str | None] = mapped_column(String(64))
-    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     source_chunk_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("document_chunks.id")
+        String(64), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
     source_block_id: Mapped[str | None] = mapped_column(String(128))
     sheet_name: Mapped[str | None] = mapped_column(String(64))
@@ -386,9 +391,11 @@ class AcademicRuleSet(Base):
     category_order: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     course_count: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
     content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     source_chunk_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("document_chunks.id")
+        String(64), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
     error_code: Mapped[str | None] = mapped_column(String(64))
     created_at: Mapped[datetime] = mapped_column(DateTime, nullable=False, default=utcnow)
@@ -434,9 +441,11 @@ class DegreeRuleRow(Base):
     minimum_credits: Mapped[str] = mapped_column(String(8), nullable=False)
     required_course_codes: Mapped[list] = mapped_column(JSON, nullable=False, default=list)
     effective_from: Mapped[str | None] = mapped_column(String(32))
-    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     source_chunk_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("document_chunks.id")
+        String(64), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
 
     rule_set: Mapped[AcademicRuleSet] = relationship(back_populates="rules")
@@ -461,9 +470,11 @@ class DegreeRuleCourse(Base):
     course_name: Mapped[str] = mapped_column(String(200), nullable=False)
     credits: Mapped[str] = mapped_column(String(8), nullable=False)
     category: Mapped[str] = mapped_column(String(64), nullable=False)
-    source_doc_id: Mapped[str] = mapped_column(String(36), ForeignKey("documents.id"), nullable=False)
+    source_doc_id: Mapped[str] = mapped_column(
+        String(36), ForeignKey("documents.id", ondelete="CASCADE"), nullable=False
+    )
     source_chunk_id: Mapped[str | None] = mapped_column(
-        String(64), ForeignKey("document_chunks.id")
+        String(64), ForeignKey("document_chunks.id", ondelete="SET NULL")
     )
 
     rule_set: Mapped[AcademicRuleSet] = relationship(back_populates="courses")

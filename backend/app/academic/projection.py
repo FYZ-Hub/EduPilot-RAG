@@ -15,6 +15,7 @@
 
 from __future__ import annotations
 
+import re
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 
@@ -32,6 +33,7 @@ from app.academic.types import (
     to_credit,
 )
 from app.core.hashing import stable_digest
+from app.core.privacy import scrub
 
 # 只允许「正式解析后的表格块」参与业务字段提取；chunk 文本一律拒绝
 TABLE_BLOCK_TYPES = ("table", "table_row", "sheet")
@@ -112,6 +114,308 @@ class RuleSetProjection:
 def projection_fingerprint(parts: Sequence[str]) -> str:
     """内容指纹：同一来源的相同内容必须得到同一指纹（幂等导入的依据）。"""
     return stable_digest(list(parts))
+
+
+# ===========================================================================
+# 阶段 7B-1：从**真实 DocumentBlock** 确定性投影演示学业资料
+#
+# 业务字段（专业、招生年份、规则版本、生效日期、毕业总学分、类别最低学分、
+# 必修课程代码、课程目录、成绩记录）**只**来自 DocumentBlock；
+# DocumentChunk 仅用于建立 source_chunk_id 与后续证据定位。
+# ===========================================================================
+
+ACADEMIC_PROJECTION_VERSION = "academic-projection-v1"
+
+BLOCK_TABLE_HEADER = "table_header"
+BLOCK_TABLE_ROW = "table_row"
+
+# 成绩记录行必须同时具备这些标签，否则不是课程记录行
+RECORD_REQUIRED_LABELS = ("课程代码", "课程名称", "学分", "课程类别", "状态")
+# 培养方案必需字段的标签
+RULE_REQUIRED_LABELS = ("专业名称", "招生年份", "文档版本", "生效日期")
+
+_COURSE_CODE_RE = re.compile(r"^[A-Za-z]{2,5}-[A-Za-z]{2,5}\d{2,5}$")
+_NUMERIC_RE = re.compile(r"^\d+(?:\.\d+)?$")
+_TOTAL_CREDITS_RE = re.compile(r"毕业总学分[：:]\s*(?P<credits>\d+(?:\.\d+)?)\s*学分")
+_CATEGORY_MINIMUM_RE = re.compile(
+    r"^[·•\-]?\s*(?P<category>[^\s：:；;]{2,12})[：:]\s*(?P<credits>\d+(?:\.\d+)?)\s*学分"
+)
+_TOTAL_CREDITS_LABEL = "毕业总学分"
+_LABEL_SPLIT_RE = re.compile(r"[；;]")
+_LABEL_PAIR_RE = re.compile(r"(?P<label>[^\s：:；;]{1,20})[：:]\s*(?P<value>[^\s：:；;]+)")
+_UNSAFE_DISPLAY_RE = re.compile(r"[\\/:*?\"<>|\x00-\x1f\x7f]")
+_DIGIT_PREFIX_RE = re.compile(r"^\d+$")
+
+
+@dataclass(frozen=True)
+class SourceBlockView:
+    """``DocumentBlock`` 的只读视图；不含路径、校验和等内部字段。"""
+
+    block_index: int
+    block_type: str
+    text: str
+    page_number: int | None = None
+    sheet_name: str | None = None
+    row_start: int | None = None
+    row_end: int | None = None
+    section_title: str | None = None
+
+
+@dataclass(frozen=True)
+class RecordDraft:
+    """一条课程记录草稿 + 其真实来源块定位。"""
+
+    record: CourseRecord
+    block_index: int
+    sheet_name: str | None
+    row_start: int | None
+    row_end: int | None
+
+
+@dataclass(frozen=True)
+class RuleSetDraft:
+    """一个培养方案规则草稿 + 各字段的真实来源块定位。"""
+
+    rule_set: DegreeRuleSet
+    header_block_index: int
+    category_blocks: tuple[tuple[str, int], ...] = ()
+    course_blocks: tuple[tuple[str, int], ...] = ()
+
+
+def labelled_pairs(text: str) -> dict[str, str]:
+    """解析 ``键: 值；键: 值`` 与 ``键：值 键：值`` 两种真实形态。"""
+    pairs: dict[str, str] = {}
+    parts = [part for part in _LABEL_SPLIT_RE.split(text or "") if part.strip()]
+    if len(parts) >= 2:
+        for part in parts:
+            for separator in ("：", ":"):
+                if separator in part:
+                    label, _, value = part.partition(separator)
+                    pairs.setdefault(label.strip(), value.strip())
+                    break
+        if pairs:
+            return pairs
+    for match in _LABEL_PAIR_RE.finditer(text or ""):
+        pairs.setdefault(match.group("label").strip(), match.group("value").strip())
+    return pairs
+
+
+def safe_display_name(candidate: str, max_length: int = 80) -> str:
+    """清洗显示名：拒绝路径字符与控制字符，并移除已明确标注的个人信息。"""
+    cleaned = _UNSAFE_DISPLAY_RE.sub(" ", (candidate or "").strip())
+    cleaned = " ".join(cleaned.split())[:max_length]
+    if not cleaned:
+        raise AcademicDataError("display name must not be empty")
+    return scrub(cleaned)
+
+
+def record_set_display_name(file_stem: str) -> str:
+    """从**安全显示文件名**推导记录集合名称，例如 ``匿名学生A · 课程记录``。"""
+    parts = [part for part in re.split(r"[-_]", file_stem or "") if part.strip()]
+    if parts and _DIGIT_PREFIX_RE.match(parts[0]):
+        parts = parts[1:]
+    if len(parts) >= 2:
+        return safe_display_name(f"{parts[-1]} · {parts[0]}")
+    return safe_display_name(file_stem)
+
+
+def rule_set_display_name(major: str, rule_version: str) -> str:
+    """培养方案显示名只用真实提取到的专业与版本，不含文件名或路径。"""
+    return safe_display_name(f"{major}培养方案 {rule_version}")
+
+
+def project_record_rows(blocks: Sequence[SourceBlockView]) -> tuple[RecordDraft, ...]:
+    """从表格块确定性提取课程记录；非课程记录行（如汇总表）自然跳过。"""
+    headers = [block for block in blocks if block.block_type == BLOCK_TABLE_HEADER]
+    rows = [block for block in blocks if block.block_type == BLOCK_TABLE_ROW]
+    if not headers or not rows:
+        raise AcademicDataError("record set requires table_header and table_row blocks")
+
+    header_labels: set[str] = set()
+    for header in headers:
+        for cell in header.text.split("|"):
+            header_labels.add(cell.strip())
+    missing = [label for label in RECORD_REQUIRED_LABELS if label not in header_labels]
+    if missing:
+        raise AcademicDataError(f"missing required record columns: {sorted(missing)}")
+
+    drafts: list[RecordDraft] = []
+    for block in rows:
+        pairs = labelled_pairs(block.text)
+        if "课程代码" not in pairs:
+            continue  # 汇总表等非课程记录行
+        absent = [label for label in RECORD_REQUIRED_LABELS if label not in pairs]
+        if absent:
+            raise AcademicDataError(f"record row missing labels: {sorted(absent)}")
+        raw_status = pairs["状态"]
+        status = DEFAULT_STATUS_ALIASES.get(raw_status, raw_status)
+        if status not in COURSE_STATUSES:
+            raise AcademicDataError(f"unknown course status: {raw_status!r}")
+        drafts.append(
+            RecordDraft(
+                record=CourseRecord(
+                    course_code=pairs["课程代码"],
+                    course_name=pairs["课程名称"],
+                    credits=to_credit(pairs["学分"]),
+                    category=pairs["课程类别"],
+                    grade=pairs.get("成绩") or None,
+                    status=status,
+                    semester=pairs.get("学期") or None,
+                    schedule=pairs.get("上课时间") or None,
+                ),
+                block_index=block.block_index,
+                sheet_name=block.sheet_name,
+                row_start=block.row_start,
+                row_end=block.row_end,
+            )
+        )
+    if not drafts:
+        raise AcademicDataError("no usable course records found")
+    return tuple(drafts)
+
+
+def project_rule_set_blocks(
+    blocks: Sequence[SourceBlockView], *, doc_id: str
+) -> RuleSetDraft:
+    """从培养方案的 heading / paragraph 块提取规则与课程目录。"""
+    labels: dict[str, str] = {}
+    label_blocks: dict[str, int] = {}
+    for block in blocks:
+        for label, value in labelled_pairs(block.text).items():
+            if label in RULE_REQUIRED_LABELS and label not in labels and value:
+                labels[label] = value
+                label_blocks[label] = block.block_index
+
+    missing = [label for label in RULE_REQUIRED_LABELS if label not in labels]
+    if missing:
+        raise AcademicDataError(f"missing required rule labels: {sorted(missing)}")
+
+    major = labels["专业名称"]
+    admission_year = _parse_year(labels["招生年份"])
+    rule_version = labels["文档版本"]
+    effective_from = labels["生效日期"]
+
+    required_credits = None
+    required_credits_block: int | None = None
+    minimums: list[tuple[str, str, int]] = []
+    catalog: list[tuple[str, str, str, str, int]] = []
+    categories_seen: list[str] = []
+
+    for block in blocks:
+        if block.block_type not in ("heading", "paragraph"):
+            continue
+        text = (block.text or "").strip()
+        if required_credits is None:
+            total = _TOTAL_CREDITS_RE.search(text)
+            if total:
+                required_credits = total.group("credits")
+                required_credits_block = block.block_index
+        minimum = _CATEGORY_MINIMUM_RE.match(text)
+        if minimum and minimum.group("category") != _TOTAL_CREDITS_LABEL:
+            category = minimum.group("category")
+            if category not in categories_seen:
+                categories_seen.append(category)
+                minimums.append((category, minimum.group("credits"), block.block_index))
+        entry = _parse_catalog_line(text, categories_seen)
+        if entry is not None:
+            code, name, credits, category = entry
+            catalog.append((code, name, credits, category, block.block_index))
+
+    if required_credits is None or required_credits_block is None:
+        raise AcademicDataError("missing 毕业总学分 in the plan document")
+    if not minimums:
+        raise AcademicDataError("missing category minimum credits in the plan document")
+    if not catalog:
+        raise AcademicDataError("missing course catalog in the plan document")
+
+    catalog_by_code: dict[str, tuple[str, str, str, int]] = {}
+    for code, name, credits, category, block_index in catalog:
+        if category not in categories_seen:
+            raise AcademicDataError(f"catalog category not declared: {category!r}")
+        existing = catalog_by_code.get(code)
+        if existing is not None and (existing[0], existing[1], existing[2]) != (
+            name,
+            credits,
+            category,
+        ):
+            raise AcademicDataError(f"conflicting catalog entry: {code}")
+        catalog_by_code.setdefault(code, (name, credits, category, block_index))
+
+    required_by_category: dict[str, list[str]] = {category: [] for category in categories_seen}
+    for code, (name, credits, category, _block_index) in sorted(catalog_by_code.items()):
+        if category.endswith("必修"):
+            required_by_category[category].append(code)
+
+    rules: list[DegreeRule] = []
+    category_blocks: list[tuple[str, int]] = []
+    for category, credits, block_index in minimums:
+        rules.append(
+            DegreeRule(
+                major=major,
+                admission_year=admission_year,
+                rule_version=rule_version,
+                category=category,
+                minimum_credits=to_credit(credits),
+                required_course_codes=tuple(required_by_category[category]),
+                effective_from=effective_from,
+                source_doc_id=doc_id,
+                source_chunk_id=None,
+            )
+        )
+        category_blocks.append((category, block_index))
+
+    courses = tuple(
+        RuleCourse(course_code=code, course_name=name, credits=to_credit(credits), category=category)
+        for code, (name, credits, category, _block_index) in sorted(catalog_by_code.items())
+    )
+
+    rule_set = build_rule_set(
+        rule_set_id=f"draft-{doc_id}",
+        major=major,
+        admission_year=admission_year,
+        rule_version=rule_version,
+        effective_from=effective_from,
+        required_credits=required_credits,
+        categories=tuple(rules),
+        courses=courses,
+        source_doc_id=doc_id,
+        source_chunk_id=None,
+    )
+    return RuleSetDraft(
+        rule_set=rule_set,
+        header_block_index=required_credits_block,
+        category_blocks=tuple(category_blocks),
+        course_blocks=tuple(
+            (code, entry[3]) for code, entry in sorted(catalog_by_code.items())
+        ),
+    )
+
+
+def _parse_year(value: str) -> int:
+    match = re.search(r"(\d{4})", value or "")
+    if not match:
+        raise AcademicDataError(f"invalid admission year: {value!r}")
+    return int(match.group(1))
+
+
+def _parse_catalog_line(
+    text: str, categories: Sequence[str]
+) -> tuple[str, str, str, str] | None:
+    """解析 ``QM-CS102 高等数学（一） 5.0 公共必修 第1学期 无`` 形态的课程目录行。"""
+    tokens = (text or "").split()
+    if len(tokens) < 4 or not _COURSE_CODE_RE.match(tokens[0]):
+        return None
+    for position in range(1, len(tokens) - 1):
+        if not _NUMERIC_RE.match(tokens[position]):
+            continue
+        category = tokens[position + 1]
+        if category not in categories:
+            continue
+        name = " ".join(tokens[1:position]).strip()
+        if not name:
+            continue
+        return tokens[0], name, tokens[position], category
+    return None
 
 
 def _require_table_block(block: SourceBlock) -> None:
@@ -262,15 +566,29 @@ def record_set_fingerprint(records: Sequence[CourseRecord], display_name: str) -
 
 
 __all__ = [
+    "ACADEMIC_PROJECTION_VERSION",
+    "BLOCK_TABLE_HEADER",
+    "BLOCK_TABLE_ROW",
     "DEFAULT_COLUMN_ALIASES",
     "DEFAULT_STATUS_ALIASES",
+    "RECORD_REQUIRED_LABELS",
+    "RULE_REQUIRED_LABELS",
     "TABLE_BLOCK_TYPES",
+    "RecordDraft",
     "RecordSetProjection",
+    "RuleSetDraft",
     "RuleSetProjection",
     "SourceBlock",
+    "SourceBlockView",
     "build_rule_set",
+    "labelled_pairs",
     "project_course_records",
+    "project_record_rows",
+    "project_rule_set_blocks",
     "projection_fingerprint",
+    "record_set_display_name",
     "record_set_fingerprint",
+    "rule_set_display_name",
     "rule_set_fingerprint",
+    "safe_display_name",
 ]
