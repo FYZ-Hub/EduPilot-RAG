@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 进行中（8A、8B-1 已完成；8B-2、8C、8D 未开始）**
-- 下一阶段：**阶段 8B-2 — Chat 页面布局、证据面板与来源抽屉**（必须读取 `docs/UI_SPEC.md` 第 6 节）
+- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2 已完成，8B 整体完成；8C、8D 未开始）**
+- 下一阶段：**阶段 8C — 学业规划页面**（必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）
 - 最近更新：2026-09-28
 
 ## 阶段状态
@@ -325,6 +325,138 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 
 **8B-2**：Chat 页面布局、消息样式、引用证据面板与来源抽屉（`GET /api/sources/{chunk_id}`），
 实施前必须读取 `docs/UI_SPEC.md` 第 6 节。
+
+## 阶段 8B-2 结论（RAG 问答页面、证据面板与来源原文抽屉）
+
+阶段 8 = `in_progress`；8A = `completed`；8B-1 = `completed`；**8B-2 = `completed`**；
+**阶段 8B 整体 completed**；8C、8D 未开始。
+
+**真实 LLM 仍未配置，真实回答链路未执行**：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL`
+保持为空，未修改任何 `.env`，未下载模型，未调用真实外部 API，未发出真实 `/api/chat/stream`
+（浏览器与后端日志均零命中）。默认环境继续如实为 `status=degraded`、`documents=ready`、
+**`chat=unconfigured`**、`planning=ready`，`counts.retrievable=0`（15 份演示资料仍为
+`queued / candidate`）。**正常回答、拒答、冲突、错误与中断场景全部通过 Mock SSE
+（Mock fetch + `ReadableStream`）验证**，页面未为了演示伪造 ready。
+
+### 页面能力门控（UI_SPEC 6.3）
+
+只有同时满足才允许发送：后端连接成功、`capabilities.chat === 'ready'`、
+`documents.counts.retrievable > 0`、问题非空且 ≤ 4000 字符、没有进行中的请求、且已结束引导加载。
+
+- `chat=unconfigured` → 中性配置提示（标题「大模型尚未配置」），说明需在后端 `.env`
+  配置 `LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 并重启；**页面不提供、不保存、不展示任何 API Key**。
+- `chat=unavailable` → 错误提示 + 「重新检测」（同时重读 health / documents / options）。
+- 无可检索文档 → 禁用输入框并引导「前往知识库」（链接 `/knowledge`）；
+  候选 / 处理中文档不计入，不会因此启用问答。
+- 后端不可连接 → 页面级错误条 + 禁用输入，**不建立任何 SSE**。
+- loading / empty / error / disabled 四态均有真实展示；未自动 seed、上传或配置模型。
+
+### 页面布局与交互
+
+- 标题「RAG 问答」，标题区显示真实「当前可检索文档：N」（来自 `counts.retrievable`）。
+- 桌面主对话区最大宽度 820px + 证据面板 360px（`grid-template-columns: minmax(0,1fr) 360px`）；
+  ≤1199px 单列上下布局，移动端单列；长文件名 / 长引用 / 长回答均安全换行。
+- 无消息且能力可用时显示三个**纯功能型**建议（学分要求 / 考试安排 / 教学管理规定），
+  点击只填入输入框、不自动发送、不写死任何课程、日期或学分。
+- 输入区：多行、`maxlength` 与 Store 上限共用 `MAX_CHAT_MESSAGE_CHARS=4000`、真实字符计数、
+  Enter 发送 / Shift+Enter 换行、请求期间按钮变「停止」（复用 `AbortController`）、防止重复发送。
+- 自动滚动：`isNearBottom()` 纯函数判定；接近底部随 token 跟随，用户向上滚动后暂停，
+  回到底部自动恢复（`data-auto-follow` 暴露状态，便于确定性测试）。
+
+### 安全回答渲染
+
+`frontend/src/domain/chatMarkdown.ts` 把回答正文解析为**自有**的结构节点
+（段落 / 段内换行 / 有序无序列表 / 引用块 / 代码块 / 行内代码 / 加粗 / 斜体 / `[n]` 引用标记），
+再由 `MessageContent.vue` + `MessageInline.vue` 用 Vue 文本节点输出：
+解析器中**不存在**任何 HTML 解析、链接生成或事件属性处理，模型返回的 `<script>`、
+`<a href>`、`onerror=` 一律作为普通文字显示，外部链接不会被自动创建或打开；
+仓库新增源码级守卫禁止浏览器原生事件源、原始 HTML 注入与 console 输出。
+
+### 引用与 SourceDrawer 数据流
+
+- 正文中的 `[1]` / `[2]` 只是标记：只有当对应 `citation_index` 真的有 `citation` 事件时才渲染为
+  证据色的可聚焦 `<button>`（`aria-label="查看引用 N"`），否则渲染为 `aria-disabled` 的禁用占位；
+  **没有 citation 事件时即使正文出现 `[1]` 也不会生成任何来源**，更不会推断文件名或 chunk_id。
+- 点击引用按钮 → `chat.selectCitation(index)` → 证据面板对应卡片高亮（乱序到达也按
+  `citation_index` 对齐，面板内始终升序）。
+- 证据卡只显示真实字段（编号 / 文件名 / 版本 / 生效日期 / 数据集版本 / 页码 / 工作表 /
+  行范围 / 章节 / quote），缺失字段不出空标签；未选中时提示「点击回答中的引用查看原文」；
+  冲突结果的全部版本**并列保留**，不自动隐藏旧版本、不替用户选择结论。
+- `GET /api/sources/{chunk_id}` 只在用户点击证据卡「查看原文」时调用；抽屉展示文件名、类型、
+  版本、生效日期、数据集版本与按 `file_type` 变化的定位（PDF 页码 / 章节，XLSX 工作表 / 行范围，
+  DOCX 章节），原文以 `<pre>` 文本节点输出；loading / error / empty 状态完整，
+  `SOURCE_NOT_FOUND` 显示服务端错误码与 `request_id` 并支持重试；
+  关闭或切换来源时中止旧请求，**旧响应不会覆盖较新的来源**（序号守卫）。
+
+### 终止状态与手动重试
+
+- answered：完整回答 + 「复制回答」（只复制当前回答文本）+ 「检索详情」入口。
+- refused：中性提示卡（非红色）+ 明确「当前知识库没有足够依据」+ 「调整检索范围」「前往知识库」，
+  不生成引用，`reasonCode` 在检索详情中显示。
+- conflict：警告卡并列全部真实冲突来源与版本，保留 `version_conflict`。
+- 流内 error：保留已收到的部分回答与引用，`ErrorAlert` 显示错误码与真实 / 缺失 request_id，
+  标记「回答中断」；`retryable=false` 不显示可执行重试按钮，`retryable=true` 才允许手动重试。
+- 无终止 EOF：显示「连接中断」，不当作成功，提供用户主动重试入口，不伪造 request_id 或 retryable。
+- 用户停止：状态为「已停止生成」（中性），不是红色错误。
+- 手动重试：只有用户点击才触发；复用同一条问题（不追加第二条 user 消息，请求历史里去重）；
+  `stopped / interrupted / error` 的不完整回答**不进入**下一轮问题改写上下文；
+  重试期间原失败内容仍可见，成功后由新结果替代；全程不自动重试。
+
+### 新增文件
+
+| 文件 | 职责 |
+|---|---|
+| `frontend/src/domain/chatMarkdown.ts` | 回答正文安全结构化解析（纯函数，无 HTML 解析） |
+| `frontend/src/domain/scroll.ts` | `isNearBottom()` 自动滚动判定（纯函数） |
+| `frontend/src/components/chat/MessageInline.vue` | 行内节点渲染 + 引用标记可用性判定 |
+| `frontend/src/components/chat/MessageContent.vue` | 块级结构渲染（段落 / 列表 / 代码 / 引用） |
+| `frontend/src/components/chat/MessageBubble.vue` | 用户 / 助手消息语义与终止状态卡 |
+| `frontend/src/components/chat/EvidencePanel.vue` | 证据卡列表与选中态 |
+| `frontend/src/components/chat/RetrievalScopePanel.vue` | 折叠的检索范围筛选（选项全部来自接口） |
+| `frontend/src/components/chat/ChatComposer.vue` | 输入区（计数 / Enter / 停止） |
+| `frontend/src/components/chat/ChatDetailsDialog.vue` | 检索详情（结论 / 原因码 / 请求编号 / 引用） |
+| `frontend/src/components/common/SourceDrawer.vue` | 共享来源原文抽屉（含序号守卫与中止） |
+| `frontend/src/views/ChatView.vue` | 页面编排与能力门控（替换原占位实现） |
+
+Store（`frontend/src/stores/chat.ts`）新增：`errorMessage` 字段、`canRetry`、
+`activeFilters`、`updateFilter()`、`clearFilters()`、`retry()`、`runTurn()`；
+请求历史改为剔除不完整助手回答；重试成功后替换原失败回答。
+
+### 新增测试
+
+| 文件 | 数量 | 覆盖 |
+|---|---|---|
+| `frontend/src/domain/chatMarkdown.spec.ts` | 12 | 段落 / 换行 / CRLF / 列表 / 代码块 / 行内代码 / 强调 / 引用标记 / 非数字方括号 / 代码内的 `[1]` / HTML 保持文本 / 引用块 / 空输入 |
+| `frontend/src/domain/scroll.spec.ts` | 4 | 底部跟随 / 向上滚动暂停 / 阈值边界 / 内容不足一屏 |
+| `frontend/src/components/chat/MessageContent.spec.ts` | 8 | 结构元素 / 引用按钮与点击 / 未到达占位 / 不生成来源与链接 / 选中态 / 脚本与事件属性只作文本 |
+| `frontend/src/components/chat/EvidencePanel.spec.ts` | 6 | 空态提示 / 字段裁剪 / XLSX 定位 / 冲突多版本 / 选中与 emit / 只在点击时请求原文 |
+| `frontend/src/components/chat/ChatComposer.spec.ts` | 7 | Enter / Shift+Enter / 计数 / maxlength / 停止 / 禁用原因 / 空问题 |
+| `frontend/src/components/common/SourceDrawer.spec.ts` | 9 | PDF / XLSX / DOCX 定位 / 原文纯文本 / 关闭不请求 / SOURCE_NOT_FOUND + 重试 / 网络无编号 / 旧响应不覆盖 / 关闭中止 |
+| `frontend/src/views/ChatView.spec.ts` | 31 | 能力门控 7 项 / 建议与筛选 6 项 / 回答流程 15 项 / 滚动与生命周期 3 项（含卸载中止流与来源请求） |
+| `frontend/src/stores/chat.spec.ts` | +11 | 手动重试语义 8 项（不重复失败历史、失败内容保留与替换、不自动重试、canRetry 边界）+ 筛选 3 项（含请求携带 filters） |
+| `frontend/src/tests/stream-guards.spec.ts` | +1 规则 | 新增禁止原始 HTML 注入（与事件源、console 输出并列） |
+
+### 验收
+
+- 实现前：上述定向测试 → **退出码 1**，`Test Files 8 failed | 1 passed (9)`、
+  `Tests 42 failed | 35 passed (77)`（模块未创建 / `store.retry is not a function` 等）。
+- 实现后定向（同样 9 个文件）→ **`Tests 123 passed (123)`、`Test Files 9 passed (9)`，退出码 0**。
+- `docker compose exec frontend pnpm test` → **25 files / 256 passed**，退出码 0（上一轮 168，净 +88）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → **675 tests（42 文件）全部通过**，退出码 0（无回归）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示）。
+- 真实浏览器只读验收（未改 `.env`、未配置模型、未 seed / 上传 / 删除）：
+  - `/chat` 正常打开，显示真实 `当前可检索文档：0` 与 `大模型尚未配置` 中性提示，
+    输入框与发送按钮禁用且提示「大模型尚未配置：请在后端 .env 中配置后重启服务」；
+  - 网络面板**零** `POST /api/chat/stream`，仅 `GET health / documents / demo/status / retrieval/options`；
+  - 浏览器控制台**无未处理应用错误**；`/knowledge` 无回归；
+  - 390×844 / 1024×768 / 1440×900 下 `documentElement.scrollWidth === clientWidth`
+    （无整页横向溢出），`/knowledge` 同档位同样通过。
+
+### 下一步
+
+**8C — 学业规划页面**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）。
 
 ## 阶段 8B-1 独立回归修复轮（BUG-8B1-01 / 02 / 03）
 

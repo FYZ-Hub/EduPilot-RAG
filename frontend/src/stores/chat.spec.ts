@@ -61,6 +61,10 @@ const donePayload = {
   citation_count: 1,
 }
 
+function responseOf(stream: ReadableStream<Uint8Array>): Response {
+  return { ok: true, status: 200, body: stream } as unknown as Response
+}
+
 /** 把若干文本片段切分为独立的网络 chunk，模拟真实分片到达。 */
 function streamOf(chunks: string[], signal?: AbortSignal): Response {
   const stream = new ReadableStream<Uint8Array>({
@@ -87,7 +91,7 @@ function streamOf(chunks: string[], signal?: AbortSignal): Response {
       }
     },
   })
-  return { ok: true, status: 200, body: stream } as unknown as Response
+  return responseOf(stream)
 }
 
 function mountStore() {
@@ -832,5 +836,240 @@ describe('chat store stream retryable', () => {
     expect(interruptedStore.interrupted).toBe(true)
     expect(interruptedStore.retryable).toBeNull()
     expect(interruptedStore.messages[1].retryable).toBeNull()
+  })
+})
+
+describe('chat store manual retry', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  async function failFirstTurn(store: ReturnType<typeof mountStore>, question: string) {
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([
+        frame('token', { text: '不完整回答' }),
+        frame('error', {
+          code: 'MODEL_TIMEOUT',
+          message: '生成超时，请重试',
+          retryable: true,
+          request_id: 'req-fail-1',
+        }),
+      ]),
+    )
+    store.question = question
+    await store.send()
+  }
+
+  it('keeps incomplete assistant answers out of the next request history', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '第一个问题')
+    expect(store.messages).toHaveLength(2)
+
+    mocks.streamChat.mockResolvedValueOnce(streamOf([frame('done', donePayload)]))
+    store.question = '第二个问题'
+    await store.send()
+
+    const second = mocks.streamChat.mock.calls[1][0] as { messages: ChatMessagePayload[] }
+    expect(second.messages.map((item) => item.content)).toEqual(['第一个问题', '第二个问题'])
+  })
+
+  it('keeps a stopped or interrupted answer out of the next request history', async () => {
+    mocks.streamChat.mockResolvedValue(streamOf([frame('token', { text: '半截回答' })]))
+    const store = mountStore()
+    store.question = '第一个问题'
+    await store.send()
+    expect(store.interrupted).toBe(true)
+
+    mocks.streamChat.mockResolvedValueOnce(streamOf([frame('done', donePayload)]))
+    store.question = '第二个问题'
+    await store.send()
+
+    const second = mocks.streamChat.mock.calls[1][0] as { messages: ChatMessagePayload[] }
+    expect(second.messages.map((item) => item.content)).toEqual(['第一个问题', '第二个问题'])
+  })
+
+  it('retries the same question without duplicating it in the request history', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '唯一的问题')
+
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([frame('token', { text: '完整回答' }), frame('done', donePayload)]),
+    )
+    await store.retry()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(2)
+    const retryBody = mocks.streamChat.mock.calls[1][0] as { messages: ChatMessagePayload[] }
+    expect(retryBody.messages.filter((item) => item.content === '唯一的问题')).toHaveLength(1)
+    expect(retryBody.messages).toHaveLength(1)
+    expect(retryBody.messages.at(-1)).toMatchObject({ role: 'user', content: '唯一的问题' })
+  })
+
+  it('keeps the failed answer visible until the retry finishes, then replaces it', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '问题')
+    expect(store.messages[1].content).toBe('不完整回答')
+
+    let release: (() => void) | null = null
+    mocks.streamChat.mockImplementation(async () => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(encode(frame('token', { text: '重试成功' })))
+          release = () => {
+            controller.enqueue(encode(frame('done', donePayload)))
+            controller.close()
+          }
+        },
+      })
+      return responseOf(stream)
+    })
+
+    const pending = store.retry()
+    await settleUntil(() => store.streamingContent !== '')
+    expect(store.messages.map((item) => item.content)).toEqual(['问题', '不完整回答'])
+
+    release!()
+    await pending
+
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages[1].content).toBe('重试成功')
+    expect(store.messages[1].errorCode).toBeNull()
+  })
+
+  it('never retries automatically after a failure', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '问题')
+    await Promise.resolve()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+    expect(store.canRetry).toBe(true)
+  })
+
+  it('exposes retry only for a failed turn the server did not forbid', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '问题')
+    expect(store.canRetry).toBe(true)
+
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([
+        frame('error', {
+          code: 'MODEL_RESPONSE_INVALID',
+          message: '模型响应不符合引用协议',
+          retryable: false,
+          request_id: 'req-fail-2',
+        }),
+      ]),
+    )
+    store.question = '第二个问题'
+    await store.send()
+    expect(store.retryable).toBe(false)
+    expect(store.canRetry).toBe(false)
+
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([
+        frame('error', {
+          code: 'MODEL_TIMEOUT',
+          message: '生成超时，请重试',
+          retryable: true,
+          request_id: 'req-fail-3',
+        }),
+      ]),
+    )
+    store.question = '第三个问题'
+    const pending = store.send()
+    expect(store.canRetry).toBe(false)
+    await pending
+    expect(store.canRetry).toBe(true)
+  })
+
+  it('ignores a retry with no user question to repeat', async () => {
+    const store = mountStore()
+
+    await store.retry()
+
+    expect(mocks.streamChat).not.toHaveBeenCalled()
+  })
+
+  it('ignores a retry while a stream is active', async () => {
+    const store = mountStore()
+    await failFirstTurn(store, '问题')
+
+    // 流保持打开，因此重试期间 streaming 一直为真
+    mocks.streamChat.mockImplementation(async (_body: unknown, signal?: AbortSignal) =>
+      streamOf([frame('token', { text: '进行中' })], signal),
+    )
+    const first = store.retry()
+    await settleUntil(() => store.streamingContent !== '')
+    await store.retry()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(2)
+    store.stop()
+    await first
+  })
+})
+
+describe('chat store filters', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  it('updates, lists and clears the retrieval filters', () => {
+    const store = mountStore()
+
+    store.updateFilter('major', '计算机科学与技术')
+    store.updateFilter('grade_year', 2026)
+
+    expect(store.filters.major).toBe('计算机科学与技术')
+    expect(store.filters.grade_year).toBe(2026)
+    expect(store.activeFilters).toEqual([
+      { key: 'major', label: '计算机科学与技术' },
+      { key: 'grade_year', label: '2026' },
+    ])
+
+    store.clearFilters()
+
+    expect(store.activeFilters).toEqual([])
+    expect(store.filters).toEqual({
+      major: null,
+      grade_year: null,
+      semester: null,
+      doc_category: null,
+    })
+  })
+
+  it('labels a document category filter with the real option label', async () => {
+    mocks.fetchRetrievalOptions.mockResolvedValue({
+      majors: [],
+      grade_years: [],
+      semesters: [],
+      doc_categories: [{ value: 'degree_plan', label: '培养方案' }],
+      active_dataset_version: null,
+      demo_available: true,
+    })
+    const store = mountStore()
+    await store.loadOptions()
+
+    store.updateFilter('doc_category', 'degree_plan')
+
+    expect(store.activeFilters).toEqual([{ key: 'doc_category', label: '培养方案' }])
+  })
+
+  it('sends the current filters with the request', async () => {
+    mocks.streamChat.mockResolvedValue(streamOf([frame('done', donePayload)]))
+    const store = mountStore()
+    store.updateFilter('semester', '2026-2027-1')
+    store.updateFilter('grade_year', 2026)
+    store.question = '问题'
+
+    await store.send()
+
+    const body = mocks.streamChat.mock.calls[0][0] as { filters: unknown }
+    expect(body.filters).toEqual({
+      major: null,
+      grade_year: 2026,
+      semester: '2026-2027-1',
+      doc_category: null,
+    })
   })
 })

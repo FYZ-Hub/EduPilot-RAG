@@ -59,12 +59,31 @@ export interface ChatTurnMessage {
   retryable: boolean | null
   /** 仅助手消息：流内错误码或前端协议错误码；用户停止与连接中断都不算错误。 */
   errorCode: string | null
+  /** 仅助手消息：错误的人类可读说明（服务端 error.message 或前端协议说明）。 */
+  errorMessage: string | null
   interrupted: boolean
   stopped: boolean
 }
 
+export type ChatFilterKey = 'major' | 'grade_year' | 'semester' | 'doc_category'
+
+const FILTER_KEYS: readonly ChatFilterKey[] = ['major', 'grade_year', 'semester', 'doc_category']
+
 function byCitationIndex(left: ChatCitation, right: ChatCitation): number {
   return left.citation_index - right.citation_index
+}
+
+/**
+ * 只有**完整**的助手回答才能进入下一轮的问题改写上下文。
+ * stopped / interrupted / 出错的半截回答一律不参与，避免污染后续提问。
+ */
+function isCompleteAnswer(message: ChatTurnMessage): boolean {
+  return (
+    message.role === 'assistant' &&
+    !message.interrupted &&
+    !message.stopped &&
+    message.errorCode === null
+  )
 }
 
 export const useChatStore = defineStore('chat', () => {
@@ -97,6 +116,38 @@ export const useChatStore = defineStore('chat', () => {
 
   const canSend = computed(() => !streaming.value && question.value.trim().length > 0)
 
+  const activeFilters = computed(() =>
+    FILTER_KEYS.flatMap((key) => {
+      const value = filters.value[key]
+      if (value === null || value === '') {
+        return []
+      }
+      return [{ key, label: filterLabel(key, value) }]
+    }),
+  )
+
+  /** 只有「最后一条是不完整的助手回答」且服务端没有禁止重试时才提供手动重试。 */
+  const canRetry = computed(
+    () => !streaming.value && retryable.value !== false && lastIncompleteAssistantId() !== null,
+  )
+
+  function filterLabel(key: ChatFilterKey, value: string | number): string {
+    if (key === 'doc_category') {
+      return (
+        options.value?.doc_categories.find((item) => item.value === value)?.label ?? String(value)
+      )
+    }
+    return String(value)
+  }
+
+  function updateFilter(key: ChatFilterKey, value: string | number | null): void {
+    filters.value = { ...filters.value, [key]: value }
+  }
+
+  function clearFilters(): void {
+    filters.value = emptyChatFilters()
+  }
+
   function nextId(role: ChatTurnMessage['role']): string {
     counter += 1
     return `${role}-${counter}`
@@ -115,6 +166,15 @@ export const useChatStore = defineStore('chat', () => {
     validationError.value = null
     stopped.value = false
     interrupted.value = false
+  }
+
+  /** 最后一条消息若是不完整的助手回答，返回它的 id（用于重试替换）。 */
+  function lastIncompleteAssistantId(): string | null {
+    const last = messages.value.at(-1)
+    if (last && last.role === 'assistant' && !isCompleteAnswer(last)) {
+      return last.id
+    }
+    return null
   }
 
   function upsertCitation(citation: ChatCitation): void {
@@ -161,24 +221,80 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
-    resetStreamState()
-    messages.value = [
-      ...messages.value,
-      {
-        id: nextId('user'),
-        role: 'user',
-        content: text,
-        outcome: null,
-        citations: [],
-        requestId: null,
-        reasonCode: null,
-        retryable: null,
-        errorCode: null,
-        interrupted: false,
-        stopped: false,
-      },
-    ]
     question.value = ''
+    await runTurn(text, true)
+  }
+
+  /**
+   * 手动重试上一条问题：**只有用户点击才会调用**，绝不自动重试。
+   *
+   * 不追加新的 user 消息，因此请求历史里不会出现两次同样的问题；
+   * 重试成功后新的回答会替代原来的不完整回答，失败时旧内容仍然保留。
+   */
+  async function retry(): Promise<void> {
+    if (streaming.value) {
+      return
+    }
+    const lastUser = [...messages.value].reverse().find((message) => message.role === 'user')
+    if (!lastUser) {
+      return
+    }
+    await runTurn(lastUser.content, false)
+  }
+
+  /** 本轮请求要发送的消息：剔除不完整的助手回答，只保留可用上下文与当前问题。 */
+  function requestMessages(): ChatMessagePayload[] {
+    return buildChatRequestMessages(
+      messages.value
+        .filter((message) => message.role === 'user' || isCompleteAnswer(message))
+        .map<ChatMessagePayload>((message) => ({
+          role: message.role,
+          content: message.content,
+        })),
+    )
+  }
+
+  function createUserMessage(content: string): ChatTurnMessage {
+    return {
+      id: nextId('user'),
+      role: 'user',
+      content,
+      outcome: null,
+      citations: [],
+      requestId: null,
+      reasonCode: null,
+      retryable: null,
+      errorCode: null,
+      errorMessage: null,
+      interrupted: false,
+      stopped: false,
+    }
+  }
+
+  function createAssistantMessage(): ChatTurnMessage {
+    return {
+      id: nextId('assistant'),
+      role: 'assistant',
+      content: streamingContent.value,
+      outcome: outcome.value,
+      citations: [...citations.value],
+      requestId: requestId.value,
+      reasonCode: reasonCode.value,
+      retryable: retryable.value,
+      errorCode: streamError.value?.code ?? null,
+      errorMessage: streamError.value?.message ?? null,
+      interrupted: interrupted.value,
+      stopped: stopped.value,
+    }
+  }
+
+  /** 执行一轮问答；``appendUser`` 为 false 时视为对同一条问题的重试。 */
+  async function runTurn(text: string, appendUser: boolean): Promise<void> {
+    resetStreamState()
+    const replaceId = appendUser ? null : lastIncompleteAssistantId()
+    if (appendUser) {
+      messages.value = [...messages.value, createUserMessage(text)]
+    }
     streaming.value = true
 
     const current = new AbortController()
@@ -217,12 +333,7 @@ export const useChatStore = defineStore('chat', () => {
     try {
       const response = await streamChat(
         {
-          messages: buildChatRequestMessages(
-            messages.value.map<ChatMessagePayload>((message) => ({
-              role: message.role,
-              content: message.content,
-            })),
-          ),
+          messages: requestMessages(),
           filters: { ...filters.value },
         },
         current.signal,
@@ -280,22 +391,15 @@ export const useChatStore = defineStore('chat', () => {
     }
 
     if (streamingContent.value !== '' || parser.sawTerminal) {
-      messages.value = [
-        ...messages.value,
-        {
-          id: nextId('assistant'),
-          role: 'assistant',
-          content: streamingContent.value,
-          outcome: outcome.value,
-          citations: [...citations.value],
-          requestId: requestId.value,
-          reasonCode: reasonCode.value,
-          retryable: retryable.value,
-          errorCode: streamError.value?.code ?? null,
-          interrupted: interrupted.value,
-          stopped: stopped.value,
-        },
-      ]
+      const next = [...messages.value]
+      if (replaceId !== null) {
+        const replaceIndex = next.findIndex((message) => message.id === replaceId)
+        if (replaceIndex >= 0) {
+          next.splice(replaceIndex, 1)
+        }
+      }
+      next.push(createAssistantMessage())
+      messages.value = next
     }
   }
 
@@ -336,8 +440,13 @@ export const useChatStore = defineStore('chat', () => {
     retryable,
     validationError,
     canSend,
+    canRetry,
+    activeFilters,
     loadOptions,
     send,
+    retry,
+    updateFilter,
+    clearFilters,
     stop,
     selectCitation,
     clearConversation,

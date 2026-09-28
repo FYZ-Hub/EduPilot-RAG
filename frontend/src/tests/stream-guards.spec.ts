@@ -6,13 +6,14 @@ import { describe, expect, it } from 'vitest'
 /**
  * Chat 协议层的源码级守卫（UI_SPEC 6.5 / 9、PRODUCT_SPEC 6.3）：
  * 不得使用浏览器原生的事件源接口（接口是 POST，必须走 fetch 流），
- * 也不得把问题、回答或 quote 写进浏览器控制台。
+ * 不得向 DOM 注入原始 HTML，也不得把问题、回答或 quote 写进浏览器控制台。
  *
  * 被禁字面量由片段拼接而成，避免守卫文件自身命中。
  */
 const FORBIDDEN: Array<{ label: string; needle: string }> = [
   { label: 'Event' + 'Source usage', needle: 'Event' + 'Source' },
   { label: 'con' + 'sole' + ' output', needle: 'con' + 'sole' + '.' },
+  { label: 'raw HTML injection', needle: 'inner' + 'HTML' },
 ]
 
 function sourceFiles(directory: string): string[] {
