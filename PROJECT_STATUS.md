@@ -326,6 +326,113 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 **8B-2**：Chat 页面布局、消息样式、引用证据面板与来源抽屉（`GET /api/sources/{chunk_id}`），
 实施前必须读取 `docs/UI_SPEC.md` 第 6 节。
 
+## 阶段 8B-1 独立回归修复轮（BUG-8B1-01 / 02 / 03）
+
+阶段 8 = `in_progress`；8A = `completed`；**8B-1 = `completed`**；**8B-2 尚未开始**。
+本轮只修复 8B-1 交付中「请求长度契约、终止元数据丢失」三个缺陷，
+未实现 ChatView 页面、证据侧栏与来源抽屉，未开始 8C。
+
+**未配置或调用任何真实 LLM**：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 仍为空，
+未修改任何 `.env`、未下载模型、未发出真实 `/api/chat/stream` 请求（后端日志零命中）、
+未执行 seed / 上传 / 删除、未修改后端接口或 `PRODUCT_SPEC.md` / `UI_SPEC.md`。
+默认环境仍如实为 `status=degraded`、`documents=ready`、**`chat=unconfigured`**、`planning=ready`；
+`GET /api/documents` 仍为 `ready=0 / retrievable=0 / processing=15 / failed=0`，
+`demo/status.last_job_id` 未变，`data/` 无新增运行时产物。
+所有网络行为继续由 Mock fetch + `ReadableStream` 驱动。
+
+### BUG-8B1-01｜请求历史没有满足字符上限
+
+- 现象：`send()` 只做 `messages.slice(-MAX_CHAT_MESSAGES)`，既不管单条 4000 字符上限，
+  也不管 12000 字符总上限；多轮对话或粘贴长文后会向后端发送**必然 422** 的请求。
+- 根因：`frontend/src/stores/chat.ts:184`（修复前）用 `slice(-MAX_CHAT_MESSAGES)` 直接构造请求体，
+  没有任何字符维度约束，也没有在前端拦截超长问题。
+- 修复前证据：新增测试后
+  `pnpm vitest run src/api/chat.spec.ts src/domain/chatStream.spec.ts src/stores/chat.spec.ts`
+  → **`PRE_FIX_EXIT=1`**、`Test Files 3 failed`；其中
+  `src/api/chat.spec.ts` 7 项失败（`→ buildChatRequestMessages is not a function`），
+  `src/stores/chat.spec.ts` 15 项失败（`No "MAX_CHAT_MESSAGE_CHARS" export is defined on the "@/api/chat" mock`）。
+- 修复：
+  - `frontend/src/api/chat.ts:18-24` 增加与后端一致的常量
+    `MAX_CHAT_MESSAGE_CHARS = 4000`、`MAX_CHAT_TOTAL_CHARS = 12000`、`CHAT_QUESTION_TOO_LONG`；
+  - `frontend/src/api/chat.ts:79-105` 新增纯函数 `buildChatRequestMessages()`（见下节算法）；
+  - `frontend/src/stores/chat.ts:155-162` 在追加消息前校验当前问题长度，
+    超限时写入 `validationError = { code: CHAT_QUESTION_TOO_LONG, message }` 并**直接返回**：
+    不清空输入框、不追加 user 消息、不进入 `streaming`、不发起 fetch；
+  - `frontend/src/stores/chat.ts:220-225` 请求体改用 `buildChatRequestMessages()`；
+  - `validationError` 是独立的本地校验结构（**没有 request_id 字段**），不使用 `ApiError`，
+    因此不存在伪造服务端请求编号的可能。
+
+### BUG-8B1-02｜`done.reason_code` 被丢弃
+
+- 现象：解析器已正确解析 `done.reason_code`，但 Store 的 `apply(done)` 只保存 `outcome` 与
+  `request_id`，拒绝原因（`no_evidence` / `planning_unavailable` / `version_conflict`）全部丢失，
+  8B-2 无法区分「无依据拒答」与「规划能力未接入」。
+- 根因：`frontend/src/stores/chat.ts:165-169`（修复前）的 `apply()` 在 `done` 分支中
+  仅赋值 `doneOutcome` / `doneRequestId`，没有 `reason_code` 通道，`ChatTurnMessage` 也没有对应字段。
+- 修复前证据：`chat store terminal metadata` 的 5 项测试全部失败
+  （`store.reasonCode` 为 `undefined`，`store.messages[1].reasonCode` 为 `undefined`）。
+- 修复：新增流状态 `reasonCode: string | null`（`frontend/src/stores/chat.ts:89`）与
+  `ChatTurnMessage.reasonCode`（`:57`）；`apply(done)` 记录 `doneReasonCode`（`:203`）；
+  终态落地时写入（`:279`）；`resetStreamState()` 清理（`:113`）；
+  助手消息持久保存（`:292`）。**前端不推断、不补默认值**，只在 `done` 事件存在时保存真实值。
+
+### BUG-8B1-03｜`error.retryable` 被丢弃
+
+- 现象：流内 `error.retryable` 已被解析，但转换成 `ApiError` 时丢掉，Store 也没有该状态，
+  8B-2 无法判断「回答中断」是否值得提供重试。
+- 根因：`frontend/src/stores/chat.ts:171-176`（修复前）只把 `code` / `message` / `request_id`
+  放进 `ApiError`，`retryable` 未被任何状态接收。
+- 修复前证据：`chat store stream retryable` 的 6 项测试全部失败
+  （`store.retryable` 为 `undefined`；`retryable=true/false` 均丢失）。
+- 修复：新增流状态 `retryable: boolean | null`（`frontend/src/stores/chat.ts:91`）与
+  `ChatTurnMessage.retryable`（`:59`）；**唯一数据来源**是流内 `error` 事件
+  （`apply()` 中 `retryable.value = event.error.retryable`，`:213`）；
+  终态落地后写入助手消息（`:293`）；`resetStreamState()` 恢复 `null`（`:114`）。
+  HTTP 开流前错误、网络失败、协议错误、用户停止、无终止 EOF **一律保持 `null`**，
+  不猜测服务端重试语义。
+  （未改动 `ApiError`，避免出现「两处都存 retryable」的重复来源。）
+
+### 请求历史选择算法（`buildChatRequestMessages`）
+
+输入为**包含当前问题的完整会话**，输出满足后端契约的消息数组：
+
+1. 丢弃内容超过 `MAX_CHAT_MESSAGE_CHARS`（4000）的消息 —— **整条丢弃，绝不截断或改写正文**；
+2. 取最近的 `MAX_CHAT_MESSAGES`（10）条，保证数量上限，顺序不变；
+3. 若字符总数超过 `MAX_CHAT_TOTAL_CHARS`（12000），从**最旧**的一条开始逐条删除，
+   直到满足上限（始终保留最后一条，即当前问题）；
+4. 输出保证：`1 <= 数量 <= 10`、每条 `<= 4000`、总计 `<= 12000`、顺序不变、
+   最后一条仍是当前问题（其长度由 `send()` 在调用前校验）。
+
+### 新增测试（24 项）
+
+- `frontend/src/api/chat.spec.ts`（+7）：已合规会话原样保留、超总上限从最旧开始删除、
+  数量上限 10 且顺序不变、超单条上限整条丢弃而不截断、当前问题保持在最后且正文不被改写、
+  空会话返回空、任意长会话都满足四条后端契约（数量 / 单条 / 总量 / 末条为 user）。
+- `frontend/src/domain/chatStream.spec.ts`（+2，契约守卫，修复前后均通过）：
+  `error` 事件的 `retryable` 原样保留、`done.reason_code` 非 null 时原样保留。
+- `frontend/src/stores/chat.spec.ts`（+15）：
+  恰好 4000 字符可发送、4001 字符不发 fetch 且保留输入框 / 不追加消息 / 不进入 streaming /
+  返回 `CHAT_QUESTION_TOO_LONG` / 不伪造 request_id、下一次有效发送清除校验错误、
+  8 轮长会话每次请求都满足后端契约；`no_evidence` / `planning_unavailable` /
+  `version_conflict` / `null` 四种 reason_code 的保存、新请求清理旧值、助手消息持久保存；
+  `retryable=true` / `retryable=false` 的保存、新请求清理、
+  HTTP 开流前错误 / 网络失败 / 协议错误 / 用户停止 / 无终止 EOF 均保持 `null`。
+
+### 验收
+
+- 定向（3 个文件）：修复前 **退出码 1**（`Test Files 3 failed`）→ 修复后
+  **`Tests 68 passed (68)`、`Test Files 3 passed (3)`，退出码 0**。
+- `docker compose exec frontend pnpm test` → **18 files / 168 passed**，退出码 0（上一轮 144，净 +24）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → **675 tests（42 文件）全部通过**，退出码 0（无回归）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示）。
+
+### 下一步
+
+**8B-2**：Chat 页面布局、消息样式、引用证据面板与来源抽屉（`GET /api/sources/{chunk_id}`），
+实施前必须读取 `docs/UI_SPEC.md` 第 6 节。
+
 ## 阶段 8 前置独立修复轮（BUG-8-PRE-01：空知识库启动死锁）
 
 阶段 7 仍为 `completed`，阶段 8 仍为 `not_started`；本轮只修复健康能力的启动死锁，

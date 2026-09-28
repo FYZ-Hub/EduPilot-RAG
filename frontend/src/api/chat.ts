@@ -15,6 +15,14 @@ export type ChatOutcome = (typeof CHAT_OUTCOMES)[number]
 export const MIN_CHAT_MESSAGES = 1
 export const MAX_CHAT_MESSAGES = 10
 
+/** 单条消息的字符上限（app/chat/schemas.py MAX_MESSAGE_CHARS）。 */
+export const MAX_CHAT_MESSAGE_CHARS = 4000
+/** 全部消息的字符总上限（app/chat/schemas.py MAX_TOTAL_CHARS）。 */
+export const MAX_CHAT_TOTAL_CHARS = 12000
+
+/** 前端本地校验错误码：问题超过单条上限时**就地提示**，不静默截断、不发起请求。 */
+export const CHAT_QUESTION_TOO_LONG = 'CHAT_QUESTION_TOO_LONG'
+
 export interface ChatMessagePayload {
   role: 'user' | 'assistant'
   content: string
@@ -66,6 +74,34 @@ export interface ChatStreamErrorPayload {
 
 export function emptyChatFilters(): ChatFilters {
   return { major: null, grade_year: null, semester: null, doc_category: null }
+}
+
+/**
+ * 从完整会话中挑选本次请求要发送的消息，保证满足后端契约：
+ * ``1 <= 数量 <= 10``、``每条 <= 4000`` 字符、``总字符 <= 12000``、最后一条仍是当前问题。
+ *
+ * - 超过单条上限的消息**整条丢弃**，绝不截断或改写任何正文；
+ * - 超过总上限时从**最旧**的历史开始删除，直到满足上限；
+ * - 顺序保持不变，当前问题（最后一条）始终保留 —— 调用方必须在此之前校验它不超限。
+ */
+export function buildChatRequestMessages(
+  messages: readonly ChatMessagePayload[],
+): ChatMessagePayload[] {
+  if (messages.length === 0) {
+    return []
+  }
+  const withinSingleLimit = messages.filter(
+    (message) => message.content.length <= MAX_CHAT_MESSAGE_CHARS,
+  )
+  const selected = withinSingleLimit.slice(-MAX_CHAT_MESSAGES)
+
+  let start = 0
+  let total = selected.reduce((sum, message) => sum + message.content.length, 0)
+  while (total > MAX_CHAT_TOTAL_CHARS && start < selected.length - 1) {
+    total -= selected[start].content.length
+    start += 1
+  }
+  return selected.slice(start)
 }
 
 /**

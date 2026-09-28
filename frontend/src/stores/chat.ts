@@ -6,10 +6,12 @@
  *
  * 状态规则：
  * - 同一时间只允许一个活动请求；第二次 ``send`` 在流未结束时直接忽略；
+ * - 请求历史遵循后端契约（1–10 条、单条 ≤ 4000 字符、总计 ≤ 12000 字符），
+ *   超长问题**就地提示**并保留输入框，绝不静默截断；
  * - ``token`` 只追加文本，**绝不**根据正文里的 ``[1]`` 生成引用；
  * - ``citation`` 可乱序到达，按 ``citation_index`` 去重并升序保存；
- * - ``done.outcome`` 只允许 answered / refused / conflict；
- * - 流内 ``error`` 保留已收到的部分回答与引用，并使用事件携带的 request_id；
+ * - ``done.outcome`` 只允许 answered / refused / conflict，``done.reason_code`` 原样保存；
+ * - 流内 ``error`` 保留已收到的部分回答与引用，并使用事件携带的 ``request_id`` 与 ``retryable``；
  * - 无终止事件的 EOF 记为「连接中断」，**不能**当成成功；
  * - 用户主动停止使用 ``AbortController``，状态为 ``stopped`` 而不是错误；
  * - 失败后不自动重复提交问题。
@@ -19,8 +21,10 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
 import {
+  buildChatRequestMessages,
+  CHAT_QUESTION_TOO_LONG,
   emptyChatFilters,
-  MAX_CHAT_MESSAGES,
+  MAX_CHAT_MESSAGE_CHARS,
   streamChat,
   type ChatCitation,
   type ChatFilters,
@@ -35,6 +39,12 @@ import {
   type ChatStreamEvent,
 } from '@/domain/chatStream'
 
+/** 本地（非服务端）校验错误：没有 request_id 字段，因此不可能被伪造。 */
+export interface ChatValidationError {
+  code: string
+  message: string
+}
+
 export interface ChatTurnMessage {
   id: string
   role: 'user' | 'assistant'
@@ -43,6 +53,10 @@ export interface ChatTurnMessage {
   outcome: ChatOutcome | null
   citations: ChatCitation[]
   requestId: string | null
+  /** 仅助手消息：服务端 ``done.reason_code`` 的真实值，前端绝不推断或伪造。 */
+  reasonCode: string | null
+  /** 仅助手消息：服务端流内 ``error.retryable`` 的真实值；其它路径保持 null。 */
+  retryable: boolean | null
   /** 仅助手消息：流内错误码或前端协议错误码；用户停止与连接中断都不算错误。 */
   errorCode: string | null
   interrupted: boolean
@@ -71,6 +85,12 @@ export const useChatStore = defineStore('chat', () => {
   const outcome = ref<ChatOutcome | null>(null)
   const streamError = ref<ApiError | null>(null)
   const requestId = ref<string | null>(null)
+  /** 服务端 ``done.reason_code``；唯一来源是 done 事件。 */
+  const reasonCode = ref<string | null>(null)
+  /** 服务端流内 ``error.retryable``；唯一来源是 error 事件，其它路径保持 null。 */
+  const retryable = ref<boolean | null>(null)
+  /** 本地校验错误（超长问题）；不来自服务端。 */
+  const validationError = ref<ChatValidationError | null>(null)
 
   let controller: AbortController | null = null
   let counter = 0
@@ -90,6 +110,9 @@ export const useChatStore = defineStore('chat', () => {
     outcome.value = null
     streamError.value = null
     requestId.value = null
+    reasonCode.value = null
+    retryable.value = null
+    validationError.value = null
     stopped.value = false
     interrupted.value = false
   }
@@ -129,6 +152,15 @@ export const useChatStore = defineStore('chat', () => {
       return
     }
 
+    // 超长问题**就地提示**：不清空输入框、不追加消息、不进入 streaming、不发起请求
+    if (text.length > MAX_CHAT_MESSAGE_CHARS) {
+      validationError.value = {
+        code: CHAT_QUESTION_TOO_LONG,
+        message: `问题过长：最多 ${MAX_CHAT_MESSAGE_CHARS} 个字符（当前 ${text.length} 个）`,
+      }
+      return
+    }
+
     resetStreamState()
     messages.value = [
       ...messages.value,
@@ -139,6 +171,8 @@ export const useChatStore = defineStore('chat', () => {
         outcome: null,
         citations: [],
         requestId: null,
+        reasonCode: null,
+        retryable: null,
         errorCode: null,
         interrupted: false,
         stopped: false,
@@ -152,6 +186,7 @@ export const useChatStore = defineStore('chat', () => {
     const parser = new ChatStreamParser()
     let doneOutcome: ChatOutcome | null = null
     let doneRequestId: string | null = null
+    let doneReasonCode: string | null = null
 
     const apply = (event: ChatStreamEvent): void => {
       if (event.name === 'token') {
@@ -165,6 +200,7 @@ export const useChatStore = defineStore('chat', () => {
       if (event.name === 'done') {
         doneOutcome = event.done.outcome
         doneRequestId = event.done.request_id
+        doneReasonCode = event.done.reason_code
         return
       }
       // 流内 error：保留部分回答与引用，只记录错误本身
@@ -174,18 +210,19 @@ export const useChatStore = defineStore('chat', () => {
         requestId: event.error.request_id,
       })
       requestId.value = event.error.request_id
+      retryable.value = event.error.retryable
     }
 
     let failure: ApiError | null = null
     try {
       const response = await streamChat(
         {
-          messages: messages.value
-            .slice(-MAX_CHAT_MESSAGES)
-            .map<ChatMessagePayload>((message) => ({
+          messages: buildChatRequestMessages(
+            messages.value.map<ChatMessagePayload>((message) => ({
               role: message.role,
               content: message.content,
             })),
+          ),
           filters: { ...filters.value },
         },
         current.signal,
@@ -239,6 +276,7 @@ export const useChatStore = defineStore('chat', () => {
     } else if (doneOutcome !== null) {
       outcome.value = doneOutcome
       requestId.value = doneRequestId
+      reasonCode.value = doneReasonCode
     }
 
     if (streamingContent.value !== '' || parser.sawTerminal) {
@@ -251,6 +289,8 @@ export const useChatStore = defineStore('chat', () => {
           outcome: outcome.value,
           citations: [...citations.value],
           requestId: requestId.value,
+          reasonCode: reasonCode.value,
+          retryable: retryable.value,
           errorCode: streamError.value?.code ?? null,
           interrupted: interrupted.value,
           stopped: stopped.value,
@@ -292,6 +332,9 @@ export const useChatStore = defineStore('chat', () => {
     outcome,
     streamError,
     requestId,
+    reasonCode,
+    retryable,
+    validationError,
     canSend,
     loadOptions,
     send,

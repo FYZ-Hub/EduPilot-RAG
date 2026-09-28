@@ -167,6 +167,34 @@ describe('chat stream parser framing', () => {
     expect(events).toEqual([])
     expect(parser.sawTerminal).toBe(false)
   })
+
+  it('parses an error event and keeps its retryable flag', () => {
+    const parser = new ChatStreamParser()
+    const payload = {
+      code: 'MODEL_TIMEOUT',
+      message: '生成超时，请重试',
+      retryable: true,
+      request_id: 'req-err-1',
+    }
+    const events = parser.push(encode(frame('error', payload)))
+    parser.finish()
+
+    expect(events).toEqual([{ name: 'error', error: payload }])
+    expect(parser.sawTerminal).toBe(true)
+  })
+
+  it('keeps a non-null done reason_code verbatim', () => {
+    const parser = new ChatStreamParser()
+    const payload = {
+      request_id: 'req-refused',
+      outcome: 'refused',
+      reason_code: 'no_evidence',
+      citation_count: 0,
+    }
+    const events = parser.push(encode(frame('done', payload)))
+
+    expect(events).toEqual([{ name: 'done', done: payload }])
+  })
 })
 
 describe('chat stream parser protocol violations', () => {

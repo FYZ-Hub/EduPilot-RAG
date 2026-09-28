@@ -2,7 +2,14 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createPinia, setActivePinia } from 'pinia'
 
 import { ApiError } from '@/api/client'
-import type { ChatCitation } from '@/api/chat'
+import {
+  CHAT_QUESTION_TOO_LONG,
+  MAX_CHAT_MESSAGE_CHARS,
+  MAX_CHAT_MESSAGES,
+  MAX_CHAT_TOTAL_CHARS,
+  type ChatCitation,
+  type ChatMessagePayload,
+} from '@/api/chat'
 import type { RetrievalOptions } from '@/api/retrieval'
 
 const mocks = vi.hoisted(() => ({ streamChat: vi.fn(), fetchRetrievalOptions: vi.fn() }))
@@ -509,5 +516,321 @@ describe('chat store citation selection', () => {
     expect(store.streamingContent).toBe('')
     expect(store.outcome).toBeNull()
     expect(store.requestId).toBeNull()
+  })
+})
+
+describe('chat store question validation', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  it('accepts a question of exactly the single-message limit', async () => {
+    mocks.streamChat.mockResolvedValue(streamOf([frame('done', donePayload)]))
+    const store = mountStore()
+    store.question = 'x'.repeat(MAX_CHAT_MESSAGE_CHARS)
+
+    await store.send()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+    const sent = mocks.streamChat.mock.calls[0][0] as { messages: ChatMessagePayload[] }
+    expect(sent.messages.at(-1)?.content).toHaveLength(MAX_CHAT_MESSAGE_CHARS)
+    expect(store.validationError).toBeNull()
+  })
+
+  it('rejects an over-long question without clearing the input or sending it', async () => {
+    const store = mountStore()
+    const question = 'x'.repeat(MAX_CHAT_MESSAGE_CHARS + 1)
+    store.question = question
+
+    await store.send()
+
+    expect(mocks.streamChat).not.toHaveBeenCalled()
+    expect(store.question).toBe(question)
+    expect(store.messages).toHaveLength(0)
+    expect(store.streaming).toBe(false)
+    expect(store.validationError?.code).toBe(CHAT_QUESTION_TOO_LONG)
+    expect(store.validationError?.message).toContain(String(MAX_CHAT_MESSAGE_CHARS))
+    expect(store.requestId).toBeNull()
+    expect(store.streamError).toBeNull()
+  })
+
+  it('clears the validation error once a valid question is sent', async () => {
+    const store = mountStore()
+    store.question = 'x'.repeat(MAX_CHAT_MESSAGE_CHARS + 1)
+    await store.send()
+    expect(store.validationError).not.toBeNull()
+
+    mocks.streamChat.mockResolvedValue(streamOf([frame('done', donePayload)]))
+    store.question = '正常问题'
+    await store.send()
+
+    expect(store.validationError).toBeNull()
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+  })
+
+  it('keeps every request inside the backend contract for a long conversation', async () => {
+    mocks.streamChat.mockImplementation(async () => streamOf([frame('done', donePayload)]))
+    const store = mountStore()
+
+    for (let index = 0; index < 8; index += 1) {
+      store.question = `${index}`.padEnd(3000, 'q')
+      await store.send()
+    }
+
+    const sent = mocks.streamChat.mock.calls.at(-1)?.[0] as { messages: ChatMessagePayload[] }
+    const total = sent.messages.reduce((sum, item) => sum + item.content.length, 0)
+
+    expect(sent.messages.length).toBeGreaterThanOrEqual(1)
+    expect(sent.messages.length).toBeLessThanOrEqual(MAX_CHAT_MESSAGES)
+    expect(sent.messages.every((item) => item.content.length <= MAX_CHAT_MESSAGE_CHARS)).toBe(true)
+    expect(total).toBeLessThanOrEqual(MAX_CHAT_TOTAL_CHARS)
+    expect(sent.messages.at(-1)?.role).toBe('user')
+    expect(sent.messages.at(-1)?.content.trim()).not.toBe('')
+  })
+})
+
+describe('chat store terminal metadata', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  it('keeps the server reason_code for a refusal without evidence', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('token', { text: '当前知识库没有足够依据。' }),
+        frame('done', {
+          request_id: 'req-r1',
+          outcome: 'refused',
+          reason_code: 'no_evidence',
+          citation_count: 0,
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+
+    await store.send()
+
+    expect(store.reasonCode).toBe('no_evidence')
+    expect(store.messages[1].reasonCode).toBe('no_evidence')
+  })
+
+  it('keeps the planning guard reason_code for a refusal', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('token', { text: '规划能力尚未接入。' }),
+        frame('done', {
+          request_id: 'req-r2',
+          outcome: 'refused',
+          reason_code: 'planning_unavailable',
+          citation_count: 0,
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '我的学分够吗'
+
+    await store.send()
+
+    expect(store.reasonCode).toBe('planning_unavailable')
+    expect(store.messages[1].reasonCode).toBe('planning_unavailable')
+  })
+
+  it('keeps the version conflict reason_code together with its citations', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('citation', citation(1)),
+        frame('citation', citation(2)),
+        frame('done', {
+          request_id: 'req-r3',
+          outcome: 'conflict',
+          reason_code: 'version_conflict',
+          citation_count: 2,
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '毕业总学分'
+
+    await store.send()
+
+    expect(store.reasonCode).toBe('version_conflict')
+    expect(store.outcome).toBe('conflict')
+    expect(store.messages[1].reasonCode).toBe('version_conflict')
+    expect(store.messages[1].citations).toHaveLength(2)
+  })
+
+  it('keeps a null reason_code for a normal answer', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([frame('token', { text: '答案' }), frame('done', donePayload)]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+
+    await store.send()
+
+    expect(store.reasonCode).toBeNull()
+    expect(store.messages[1].reasonCode).toBeNull()
+  })
+
+  it('clears the previous reason_code when a new request starts', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('done', {
+          request_id: 'req-r4',
+          outcome: 'refused',
+          reason_code: 'no_evidence',
+          citation_count: 0,
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+    await store.send()
+    expect(store.reasonCode).toBe('no_evidence')
+
+    mocks.streamChat.mockResolvedValue(streamOf([frame('done', donePayload)]))
+    store.question = '第二个问题'
+    const pending = store.send()
+    expect(store.reasonCode).toBeNull()
+    await pending
+
+    expect(store.messages.at(-1)?.reasonCode).toBeNull()
+    expect(store.messages[1].reasonCode).toBe('no_evidence')
+  })
+})
+
+describe('chat store stream retryable', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  it('keeps retryable=true from an in-stream error', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('token', { text: '部分回答' }),
+        frame('error', {
+          code: 'MODEL_TIMEOUT',
+          message: '生成超时，请重试',
+          retryable: true,
+          request_id: 'req-e1',
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+
+    await store.send()
+
+    expect(store.retryable).toBe(true)
+    expect(store.streamError?.code).toBe('MODEL_TIMEOUT')
+    expect(store.messages[1].retryable).toBe(true)
+    expect(store.messages[1].content).toBe('部分回答')
+  })
+
+  it('keeps retryable=false from an in-stream error', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('error', {
+          code: 'MODEL_RESPONSE_INVALID',
+          message: '模型响应不符合引用协议',
+          retryable: false,
+          request_id: 'req-e2',
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+
+    await store.send()
+
+    expect(store.retryable).toBe(false)
+    expect(store.messages[1].retryable).toBe(false)
+  })
+
+  it('clears the previous retryable when a new request starts', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([
+        frame('error', {
+          code: 'MODEL_TIMEOUT',
+          message: '生成超时，请重试',
+          retryable: true,
+          request_id: 'req-e3',
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+    await store.send()
+    expect(store.retryable).toBe(true)
+
+    mocks.streamChat.mockResolvedValue(streamOf([frame('done', donePayload)]))
+    store.question = '第二个问题'
+    const pending = store.send()
+    expect(store.retryable).toBeNull()
+    await pending
+
+    expect(store.messages[1].retryable).toBe(true)
+    expect(store.messages.at(-1)?.retryable).toBeNull()
+  })
+
+  it('leaves retryable null for a pre-stream HTTP error', async () => {
+    mocks.streamChat.mockRejectedValue(
+      new ApiError('问答能力未配置', {
+        kind: 'http',
+        status: 503,
+        code: 'LLM_PROVIDER_UNAVAILABLE',
+        requestId: 'req-http-1',
+      }),
+    )
+    const store = mountStore()
+    store.question = '问题'
+
+    await store.send()
+
+    expect(store.streamError?.requestId).toBe('req-http-1')
+    expect(store.retryable).toBeNull()
+  })
+
+  it('leaves retryable null for a network failure or a protocol violation', async () => {
+    mocks.streamChat.mockRejectedValue(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const networkStore = mountStore()
+    networkStore.question = '问题'
+    await networkStore.send()
+    expect(networkStore.retryable).toBeNull()
+
+    mocks.streamChat.mockResolvedValue(streamOf([frame('delta', { text: 'x' })]))
+    const protocolStore = mountStore()
+    protocolStore.question = '问题'
+    await protocolStore.send()
+    expect(protocolStore.streamError?.code).toBe('CHAT_STREAM_PROTOCOL_ERROR')
+    expect(protocolStore.retryable).toBeNull()
+  })
+
+  it('leaves retryable null when the user stops or the stream is interrupted', async () => {
+    mocks.streamChat.mockImplementation(async (_body: unknown, signal?: AbortSignal) =>
+      streamOf([frame('token', { text: '部分' })], signal),
+    )
+    const stoppedStore = mountStore()
+    stoppedStore.question = '问题'
+    const pending = stoppedStore.send()
+    await settleUntil(() => stoppedStore.streamingContent !== '')
+    stoppedStore.stop()
+    await pending
+    expect(stoppedStore.stopped).toBe(true)
+    expect(stoppedStore.retryable).toBeNull()
+
+    mocks.streamChat.mockResolvedValue(streamOf([frame('token', { text: '半截' })]))
+    const interruptedStore = mountStore()
+    interruptedStore.question = '问题'
+    await interruptedStore.send()
+    expect(interruptedStore.interrupted).toBe(true)
+    expect(interruptedStore.retryable).toBeNull()
+    expect(interruptedStore.messages[1].retryable).toBeNull()
   })
 })

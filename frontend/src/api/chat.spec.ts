@@ -1,7 +1,16 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { API_BASE_URL, ApiError } from './client'
-import { emptyChatFilters, streamChat, type ChatRequestBody } from './chat'
+import {
+  buildChatRequestMessages,
+  emptyChatFilters,
+  MAX_CHAT_MESSAGE_CHARS,
+  MAX_CHAT_MESSAGES,
+  MAX_CHAT_TOTAL_CHARS,
+  streamChat,
+  type ChatMessagePayload,
+  type ChatRequestBody,
+} from './chat'
 
 function okStreamResponse(): Response {
   const stream = new ReadableStream<Uint8Array>({
@@ -151,5 +160,100 @@ describe('chat streaming API', () => {
     const error = await streamChat(body(), controller.signal).catch((caught) => caught)
 
     expect(error.isAborted).toBe(true)
+  })
+})
+
+describe('chat request history selection', () => {
+  function message(role: 'user' | 'assistant', length: number): ChatMessagePayload {
+    return { role, content: 'x'.repeat(length) }
+  }
+
+  function totalChars(messages: readonly ChatMessagePayload[]): number {
+    return messages.reduce((sum, item) => sum + item.content.length, 0)
+  }
+
+  it('keeps the whole conversation when it already fits', () => {
+    const history = [
+      message('assistant', 2000),
+      message('user', 4000),
+      message('assistant', 4000),
+      message('user', 2000),
+    ]
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(totalChars(history)).toBe(MAX_CHAT_TOTAL_CHARS)
+    expect(selected).toEqual(history)
+    expect(selected.at(-1)?.role).toBe('user')
+  })
+
+  it('drops the oldest history first once the total limit is exceeded', () => {
+    const history = [
+      message('assistant', 2001),
+      message('user', 4000),
+      message('assistant', 4000),
+      message('user', 2000),
+    ]
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(totalChars(history)).toBe(MAX_CHAT_TOTAL_CHARS + 1)
+    expect(selected).toEqual(history.slice(1))
+    expect(totalChars(selected)).toBeLessThanOrEqual(MAX_CHAT_TOTAL_CHARS)
+  })
+
+  it('caps the request at the message-count limit while preserving order', () => {
+    const history = Array.from({ length: 14 }, (_, index) =>
+      message(index % 2 === 0 ? 'assistant' : 'user', 100),
+    )
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(selected).toHaveLength(MAX_CHAT_MESSAGES)
+    expect(selected).toEqual(history.slice(-MAX_CHAT_MESSAGES))
+  })
+
+  it('drops an over-long historical message instead of truncating it', () => {
+    const history = [
+      message('assistant', MAX_CHAT_MESSAGE_CHARS + 1),
+      message('user', 10),
+    ]
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(selected).toEqual([history[1]])
+    expect(selected.some((item) => item.content.length > MAX_CHAT_MESSAGE_CHARS)).toBe(false)
+  })
+
+  it('keeps the current question last and never rewrites any content', () => {
+    const history = [
+      message('user', 5000),
+      message('assistant', 150),
+      message('user', 60),
+    ]
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(selected.at(-1)).toEqual(history[2])
+    expect(selected.every((item) => history.includes(item))).toBe(true)
+  })
+
+  it('returns an empty request for an empty conversation', () => {
+    expect(buildChatRequestMessages([])).toEqual([])
+  })
+
+  it('always satisfies the backend request contract', () => {
+    const history = Array.from({ length: 14 }, (_, index) =>
+      message(index % 2 === 0 ? 'assistant' : 'user', 1500 + index),
+    )
+
+    const selected = buildChatRequestMessages(history)
+
+    expect(selected.length).toBeGreaterThanOrEqual(1)
+    expect(selected.length).toBeLessThanOrEqual(MAX_CHAT_MESSAGES)
+    expect(selected.every((item) => item.content.length <= MAX_CHAT_MESSAGE_CHARS)).toBe(true)
+    expect(totalChars(selected)).toBeLessThanOrEqual(MAX_CHAT_TOTAL_CHARS)
+    expect(selected.at(-1)?.role).toBe('user')
+    expect((selected.at(-1)?.content ?? '').trim().length).toBeGreaterThan(0)
   })
 })
