@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 进行中（8A 已完成；8B / 8C / 8D 未开始）**
-- 下一阶段：**阶段 8B — RAG 问答页面**（必须读取 `docs/UI_SPEC.md` 第 6 节）
+- 当前阶段：**阶段 8 进行中（8A、8B-1 已完成；8B-2、8C、8D 未开始）**
+- 下一阶段：**阶段 8B-2 — Chat 页面布局、证据面板与来源抽屉**（必须读取 `docs/UI_SPEC.md` 第 6 节）
 - 最近更新：2026-09-28
 
 ## 阶段状态
@@ -222,6 +222,109 @@ partial / success；图标按钮与表单控件具备可见 label 与 `aria-labe
 ### 下一步
 
 8A 修复完成后，下一步才是 **8B RAG 问答页面**（实施前必须读取 `docs/UI_SPEC.md` 第 6 节）。
+
+## 阶段 8B-1 结论（Chat 流协议、API 契约与状态机）
+
+阶段 8 = `in_progress`；8A = `completed`；**8B-1 = `completed`**；**8B-2 尚未开始**。
+本轮只交付可独立验证的**协议层与 Pinia 状态层**，未实现最终 Chat 页面布局、
+证据侧栏与来源抽屉视觉组件，未开始 8C 学业规划页面。
+
+**未配置或调用任何真实 LLM**：`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 保持为空，
+未修改任何 `.env`，未下载任何模型，未发出真实 `/api/chat/stream` 请求（后端日志零命中），
+未执行 demo seed / 上传 / 删除，未调用真实外部 API。
+默认环境仍如实为 `status=degraded`、`documents=ready`、**`chat=unconfigured`**、`planning=ready`；
+`chat=unconfigured` 与 `retrievable=0` 是当前真实运行状态，**不是**需要修掉的 Bug。
+
+### 新增文件与核心类型
+
+| 文件 | 内容 |
+|---|---|
+| `frontend/src/api/chat.ts` | `ChatRequestBody{messages,filters}`、`ChatMessagePayload`、`ChatFilters{major,grade_year,semester,doc_category}`、`ChatCitation`（13 字段）、`ChatDone`、`ChatStreamErrorPayload`、`CHAT_OUTCOMES`、`MAX_CHAT_MESSAGES=10`、`emptyChatFilters()`、`streamChat()` |
+| `frontend/src/api/retrieval.ts` | `RetrievalOptions{majors,grade_years,doc_categories,active_dataset_version,demo_available}`、`SourceDetail`（含全部定位字段）、`fetchRetrievalOptions()`、`fetchSource()` |
+| `frontend/src/domain/chatStream.ts` | `ChatStreamParser`、`ChatStreamEvent`、`ChatStreamProtocolError`（`code=CHAT_STREAM_PROTOCOL_ERROR`，只带稳定原因，不回显帧内容） |
+| `frontend/src/stores/chat.ts` | Chat 状态机（见下） |
+| `frontend/src/api/client.ts`（改） | 新增 `postStream()`：同一个 `API_BASE_URL`、同一套错误归一化，成功时**不读正文**；`ApiErrorKind` 增加前端 `protocol` 类型 |
+
+请求体**严格只有** `messages` + `filters`（测试断言 key 集合为 `['filters','messages']`），
+不存在 `session_id` / `conversation_id`；`grade_year` 前后端都保持整数 `number`；
+filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自接口，未硬编码任何取值。
+
+### SSE 分片解析方案
+
+- 使用 `fetch` + `response.body.getReader()` + 流式 `TextDecoder`；**未使用** `EventSource`
+  （接口是 POST），并有源码级守卫测试防止回退。
+- 解析器按行缓冲：只把**完整行**交给字段处理，残缺尾巴留在缓冲区，
+  因此「一个事件跨多个 chunk」「一个 chunk 含多个事件」「data / event 行被任意拆分」都不会错帧。
+- `TextDecoder` 以 `{stream:true}` 增量解码，**跨字节边界的中文字符**不会被切成乱码。
+- 行终止符支持 `LF`、`CRLF` 与孤立 `CR`；`CRLF` 恰好被拆在两个 chunk 之间时等待下一个 chunk 再判定，
+  EOF 处孤立的 `CR` 由 `finish()` 判定为行终止符。
+- `:` 开头的 SSE comment（保活）被忽略，`id` / `retry` 等字段忽略。
+- 严格只接受 `token` / `citation` / `done` / `error`：未知事件名、空 `data`、非法 JSON、
+  结构与契约不符（含 `done.outcome` 非法）、重复终止事件、终止后仍有业务事件
+  一律抛 `ChatStreamProtocolError` 并给出稳定 reason。
+- `done` / `error` 之后不再接受任何业务事件（后缀 comment 仍可接受）；
+  每次流只允许一个终止事件。
+- **无终止事件的 EOF** 由调用方依据 `sawTerminal` 判定为「连接中断」，不当作成功。
+- 解析器不生成任何事件，也**不会**因为正文里出现 `[1]` 而合成引用。
+
+### Store 状态转换
+
+`useChatStore` 管理 `messages` / `question` / `streamingContent` / `citations`（按 `citation_index`
+去重升序）/ `selectedCitationIndex` / `filters` / `options` / `streaming` / `stopped` /
+`interrupted` / `outcome` / `streamError` / `requestId`，并以 `AbortController` 管理请求生命周期。
+
+- 同一时间只允许一个活动请求：`streaming` 为真时 `send()` 直接返回，不产生第二次请求；
+  流未结束时不会自动重发。
+- `token` 只追加文本；`citation` 乱序到达也按 `citation_index` 去重后升序保存，绝不错配。
+- 终态：`done` → `outcome ∈ {answered, refused, conflict}` 并记录 `request_id`；
+  流内 `error` → 记录错误与事件携带的 `request_id`，**保留**已收到的部分回答与引用。
+- 无终止 EOF → `interrupted=true`（不是成功，也不是红色错误）。
+- 用户点击停止 → `AbortController.abort()` → `stopped=true`，`streamError` 保持 `null`；
+  停止不是错误，且停止后可再次输入；空闲或重复调用 `stop()` 都是空操作。
+- 新请求开始前清理上一轮临时流状态（内容 / 引用 / 选中项 / 终态 / 错误 / request_id），
+  **不**清空已完成的 `messages`；请求体取最近 10 条消息。
+- 组件卸载时可安全调用 `stop()`；不建立服务端会话，也不写入数据库或浏览器存储。
+
+### 新增测试（49 项）
+
+- `frontend/src/domain/chatStream.spec.ts`（17）：标准 token→citation→done；事件跨多 chunk；
+  单 chunk 多事件；中文 UTF-8 跨字节；CRLF 与 comment；孤立 CR；
+  citation 乱序保序到达；无终止 EOF；截断帧被丢弃；非法 JSON、空 data、未知事件、
+  结构不符、非法 outcome、重复终止、终止后事件、终止后 comment。
+- `frontend/src/api/chat.spec.ts`（8）：统一端点与请求头、请求体只有 messages+filters、
+  filters 原样提交、`emptyChatFilters()`、开流前 JSON 错误保留服务端 `request_id`、
+  非统一错误体回退 HTTP 状态码、网络错误不伪造编号、Abort 归类。
+- `frontend/src/api/retrieval.spec.ts`（4）：options 全字段且 `grade_years` 为 `number`、
+  空选项不造值、source 全字段与定位映射、`SOURCE_NOT_FOUND` 错误码与 `request_id`。
+- `frontend/src/stores/chat.spec.ts`（19）：标准流与终态、仅按 token 追加（正文含 `[1]` 也不生成引用）、
+  refused 无引用、conflict 保留多引用、乱序引用最终升序、流内 error 保留部分回答与 request_id、
+  无终止 EOF 记为中断、协议违规为前端错误码、用户 Abort 为 stopped 而非 error、
+  流未结束忽略第二次发送、新请求清理临时状态且保留历史、最近 10 条与 filters 原样、
+  开流前 HTTP 错误不自动重试、网络错误不伪造编号、空问题与 stop 幂等、
+  options 加载与失败、引用选择与重置、清空会话。
+- `frontend/src/tests/stream-guards.spec.ts`（1）：源码级守卫 —— 全仓 `src` 不得使用浏览器原生
+  事件源接口，也不得向浏览器控制台输出（即不会把问题、回答或 quote 写入 console）。
+  该守卫在实现前即已能检出违规（自检时命中过 1 个文件），证明其有效。
+
+### 验收
+
+- 实现前（模块尚未创建）：`pnpm vitest run` 上述 5 个文件 → **退出码 1**，
+  `Test Files 4 failed`（`Failed to resolve import "./chat"` / `"./retrieval"` /
+  `"./chatStream"` / `"./chat"`）。
+- 实现后定向：同一命令 → **`Tests 49 passed (49)`、`Test Files 5 passed (5)`，退出码 0**。
+- `docker compose exec frontend pnpm test` → **18 files / 144 passed**，退出码 0（上一轮 95，净 +49）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → **675 tests（42 文件）全部通过**，退出码 0（仅前端改动，后端无回归）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示）。
+- 数据真实性复核：`GET /api/documents` 计数仍为 `ready=0 / retrievable=0 / processing=15 / failed=0`，
+  `GET /api/demo/status` 的 `last_job_id` 未变、`active_job_id=null`，`data/` 无新增 uploads / 模型缓存，
+  后端日志**零** `/api/chat/stream` 命中。
+
+### 下一步
+
+**8B-2**：Chat 页面布局、消息样式、引用证据面板与来源抽屉（`GET /api/sources/{chunk_id}`），
+实施前必须读取 `docs/UI_SPEC.md` 第 6 节。
 
 ## 阶段 8 前置独立修复轮（BUG-8-PRE-01：空知识库启动死锁）
 

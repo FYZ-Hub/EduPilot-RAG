@@ -3,7 +3,8 @@
  *
  * - Base URL **只在此处定义**，其他模块不得自行拼接主机地址。
  * - 统一解析后端错误体 `{code, message, details, request_id}`（app/core/errors.py）。
- * - 网络失败、请求取消（AbortError）与 HTTP/服务端错误严格区分。
+ * - 网络失败、请求取消（AbortError）、HTTP/服务端错误与前端协议错误严格区分。
+ * - 既支持一次性 JSON 请求，也支持 ``postStream`` 打开 SSE 流（正文交给调用方消费）。
  * - 不在任何位置记录文件正文、API Key、路径或敏感响应；不打印请求体。
  */
 
@@ -22,7 +23,7 @@ export interface ApiErrorBody {
   request_id: string
 }
 
-export type ApiErrorKind = 'http' | 'network' | 'aborted'
+export type ApiErrorKind = 'http' | 'network' | 'aborted' | 'protocol'
 
 function isApiErrorBody(value: unknown): value is ApiErrorBody {
   if (typeof value !== 'object' || value === null) {
@@ -85,6 +86,7 @@ interface RequestOptions {
   query?: Record<string, string | number | boolean | null | undefined>
   json?: unknown
   form?: FormData
+  accept?: string
   signal?: AbortSignal
 }
 
@@ -105,12 +107,12 @@ function buildUrl(path: string, query?: RequestOptions['query']): string {
 }
 
 /**
- * 执行一次请求并返回已解析的 JSON。
+ * 执行一次 fetch，并把网络失败与请求取消转换为带类型的 :class:`ApiError`。
  *
- * 204 返回 ``undefined``；非 2xx 一律抛出带机器错误码的 :class:`ApiError`。
+ * 连接失败、DNS 失败、CORS 预检被阻断都会落到 network 分支。
  */
-export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
-  const headers: Record<string, string> = { Accept: 'application/json' }
+async function performFetch(path: string, options: RequestOptions): Promise<Response> {
+  const headers: Record<string, string> = { Accept: options.accept ?? 'application/json' }
   let body: BodyInit | undefined
 
   if (options.form) {
@@ -121,9 +123,8 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     body = JSON.stringify(options.json)
   }
 
-  let response: Response
   try {
-    response = await fetch(buildUrl(path, options.query), {
+    return await fetch(buildUrl(path, options.query), {
       method: options.method ?? 'GET',
       headers,
       body,
@@ -136,36 +137,77 @@ export async function request<T>(path: string, options: RequestOptions = {}): Pr
     // 连接失败、DNS、CORS 预检被阻断都会走到这里
     throw new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' })
   }
+}
+
+function parseJsonOrNull(text: string): unknown {
+  try {
+    return text ? JSON.parse(text) : null
+  } catch {
+    return null
+  }
+}
+
+/** 非 2xx 响应 → 统一错误体；body 不是统一形状时退回 HTTP 状态码，且不伪造 request_id。 */
+function errorFromResponse(response: Response, parsed: unknown): ApiError {
+  if (isApiErrorBody(parsed)) {
+    return new ApiError(parsed.message, {
+      kind: 'http',
+      status: response.status,
+      code: parsed.code,
+      requestId: parsed.request_id,
+      details: parsed.details,
+    })
+  }
+  return new ApiError(`请求失败（HTTP ${response.status}）`, {
+    kind: 'http',
+    status: response.status,
+  })
+}
+
+/**
+ * 执行一次请求并返回已解析的 JSON。
+ *
+ * 204 返回 ``undefined``；非 2xx 一律抛出带机器错误码的 :class:`ApiError`。
+ */
+export async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+  const response = await performFetch(path, options)
 
   if (response.status === 204) {
     return undefined as T
   }
 
   const text = await response.text()
-  let parsed: unknown
-  try {
-    parsed = text ? JSON.parse(text) : null
-  } catch {
-    parsed = null
-  }
+  const parsed = parseJsonOrNull(text)
 
   if (!response.ok) {
-    if (isApiErrorBody(parsed)) {
-      throw new ApiError(parsed.message, {
-        kind: 'http',
-        status: response.status,
-        code: parsed.code,
-        requestId: parsed.request_id,
-        details: parsed.details,
-      })
-    }
-    throw new ApiError(`请求失败（HTTP ${response.status}）`, {
-      kind: 'http',
-      status: response.status,
-    })
+    throw errorFromResponse(response, parsed)
   }
 
   return parsed as T
+}
+
+/**
+ * 建立流式响应（SSE）。成功时**不读取正文**，把 ``ReadableStream`` 交给调用方逐块消费；
+ * 开流前的非 2xx 仍走统一的 ``{code,message,details,request_id}`` 错误契约。
+ */
+export async function postStream(
+  path: string,
+  json: unknown,
+  signal?: AbortSignal,
+): Promise<Response> {
+  const response = await performFetch(path, {
+    method: 'POST',
+    json: json ?? {},
+    accept: 'text/event-stream',
+    signal,
+  })
+
+  if (!response.ok) {
+    const text = await response.text()
+    throw errorFromResponse(response, parseJsonOrNull(text))
+  }
+
+  return response
 }
 
 export function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
