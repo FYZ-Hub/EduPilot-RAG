@@ -115,7 +115,8 @@ def test_health_marks_chat_unavailable_without_retrievable_documents(tmp_path) -
         payload = _health(client)
     application.state.context.engine.dispose()
 
-    assert payload["capabilities"]["documents"] == "unavailable"
+    # 阶段 8 前置：没有可检索文档只影响 chat 的语料判定，不影响文档子系统可用性
+    assert payload["capabilities"]["documents"] == "ready"
     assert payload["capabilities"]["chat"] == "unavailable"
     assert payload["status"] == "degraded"
 
@@ -131,7 +132,8 @@ def test_health_excludes_documents_outside_the_active_dataset(tmp_path) -> None:
         payload = _health(client)
     application.state.context.engine.dispose()
 
-    assert payload["capabilities"]["documents"] == "unavailable"
+    # 文档确实存在，但一份都不可检索：documents 仍为 ready，只有 chat 缺语料
+    assert payload["capabilities"]["documents"] == "ready"
     assert payload["capabilities"]["chat"] == "unavailable"
 
 

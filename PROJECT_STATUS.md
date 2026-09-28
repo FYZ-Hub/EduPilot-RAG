@@ -22,6 +22,40 @@
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
 
+## 阶段 8 前置独立修复轮（BUG-8-PRE-01：空知识库启动死锁）
+
+阶段 7 仍为 `completed`，阶段 8 仍为 `not_started`；本轮只修复健康能力的启动死锁，
+未实现任何 Vue 页面、未进入 8A、未修改 `PRODUCT_SPEC.md` / `UI_SPEC.md`。
+
+**BUG-8-PRE-01｜`documents` 把「子系统可用性」与「已有可检索文档」当成同一状态**
+
+- 原始要求：UI_SPEC 2.4 规定 `documents` 非 `ready` 时禁用上传、seed、删除与预览；
+  UI_SPEC 5.3 规定空库（`state=empty`）必须以「加载演示资料」作为主要操作；
+  PRODUCT_SPEC 6.1 的示例中 `documents` 为 `ready` 而 `chat` 为 `unconfigured`。
+- 缺陷：`health.py` 用 `documents = "ready" if retrievable else "unavailable"` 判定，
+  而 `_retrievable_documents()` 在**查询成功但为 0** 与**查询失败**两种情况下都返回 `0`。
+  于是空库（数据库、文档 API、上传与 seed 全部正常）返回 `documents=unavailable`，
+  前端严格遵守 UI_SPEC 时会同时禁用上传与 seed —— 用户永远无法添加第一份文档。
+- 修复：
+  1. `_retrievable_documents()` 返回 `int | None`：`0` = 查询成功但无检索语料，`None` = 查询失败；
+  2. 新增 `_documents_capability()`：文档结构与文档查询可正常执行即 `ready`（**空库同样 ready**），
+     仅当相关查询确实失败（`None`）或文档表探测抛错时才 `unavailable`；
+  3. 可检索数量只用于 `chat`：`0` 或 `None` 均不允许发起 Chat；
+  4. `planning` 的阶段 7 语义完全未改动（空库仍为 `ready`）。
+- 新增/更新的测试：`backend/tests/test_health.py` 新增
+  `test_empty_library_reports_documents_ready`、`test_documents_present_but_none_retrievable_still_ready`、
+  `test_documents_ready_is_independent_of_llm_configuration`、
+  `test_health_hides_failures_and_marks_documents_unavailable`；
+  并更新 `test_health_reports_degraded_without_business_features`、
+  `test_chat_health.py`（2 项）、`test_rerank_health.py`（1 项）中随本契约变化的 `documents` 期望值。
+- 修复前：`pytest tests/test_health.py tests/test_chat_health.py tests/test_rerank_health.py -q`
+  → **7 failed / 15 passed，退出码 1**；修复后 → **22 passed，退出码 0**。
+- 真实 HTTP（空/无检索语料的开发卷）：`status=degraded`、
+  `capabilities={'documents': 'ready', 'chat': 'unconfigured', 'planning': 'ready'}`；
+  `chat` 依据真实 LLM 配置保持 `unconfigured`，未伪造 `ready`。
+- 未做：不自动 seed、不向真实数据卷写入测试数据、未让前端特殊放行 `documents=unavailable`、
+  未改动规划 / 检索 / 上传 / demo 业务逻辑与任何 Vue 页面。
+
 ## 阶段 7C 结论（确定性学业规划 API、真实证据与健康能力）
 
 **阶段 7 已完成**：7A（持久化与纯计算引擎）、7B-1（demo 投影）、7B-2（导入与 options）、

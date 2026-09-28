@@ -6,6 +6,12 @@
 
 语义要点：
 
+- ``capabilities.documents`` 表示**文档子系统是否可用**：文档结构与文档查询可正常执行即为
+  ``ready``，**空库同样是 ready**。它与「当前是否已有可检索文档」是两件事 ——
+  若把空库判成 ``unavailable``，前端按 UI_SPEC 2.4 会禁用上传与 seed
+  （BUG-8-PRE-01 的启动死锁）；只有文档表缺失或相关查询确实失败时才为 ``unavailable``。
+- 可检索文档**数量**只用于 ``capabilities.chat`` 是否具备检索语料；
+  ``_retrievable_documents()`` 返回 ``int | None`` 以区分「查询成功但为 0」与「查询失败」。
 - ``capabilities.chat`` 表示**前端是否可以发起 Chat 请求**：LLM 配置完整、Chat 已实现
   且存在当前可检索文档时为 ``ready``。它**不绑定** ``providers.llm.loaded``，
   否则会死锁：chat != ready 时前端不允许建立 SSE，而没有第一次 SSE 调用
@@ -34,8 +40,16 @@ from app.search.hydrate import build_scope
 router = APIRouter(tags=["health"])
 
 
-def _retrievable_documents(context: AppContext) -> int:
-    """统计真正可检索的文档数；失败时按“不可用”处理，绝不谎报 ready。"""
+def _retrievable_documents(context: AppContext) -> int | None:
+    """统计真正可检索的文档数。
+
+    必须区分两种「0 之外」的语义：
+
+    - ``0``：查询**成功**，只是当前没有可检索文档；
+    - ``None``：查询**失败**，无法判断。
+
+    绝不把「空库」当成「子系统不可用」，也绝不谎报 ready。
+    """
     try:
         with session_scope(context.session_factory) as session:
             scope = build_scope(session, context.settings)
@@ -46,14 +60,32 @@ def _retrievable_documents(context: AppContext) -> int:
             ).scalar()
             return int(total or 0)
     except Exception:  # noqa: BLE001 - 健康检查不得因数据库问题抛出
-        return 0
+        return None
 
 
-def _chat_capability(context: AppContext, retrievable: int) -> str:
+def _documents_capability(context: AppContext, retrievable: int | None) -> str:
+    """文档**子系统**是否可用：文档结构与文档查询可正常执行即为 ``ready``。
+
+    这与「当前是否已有可检索文档」是两件事：空库同样是 ``ready``，
+    否则前端按 UI_SPEC 2.4 会禁用上传与 seed，用户永远无法添加第一份文档。
+    只有当文档表缺失或相关查询确实失败时才降级为 ``unavailable``。
+    """
+    if retrievable is None:
+        return "unavailable"
+    try:
+        with session_scope(context.session_factory) as session:
+            session.execute(text("SELECT 1 FROM documents LIMIT 1")).all()
+        return "ready"
+    except Exception:  # noqa: BLE001 - 健康检查不得因数据库问题抛出
+        return "unavailable"
+
+
+def _chat_capability(context: AppContext, retrievable: int | None) -> str:
     """Chat 是否允许前端发起请求；**不依赖** llm.loaded，避免首次调用死锁。"""
     if not context.llm.configured:
         return "unconfigured"
-    if retrievable == 0:
+    if not retrievable:
+        # 0（没有检索语料）或 None（无法判断）都不允许发起 Chat
         return "unavailable"
     return "ready"
 
@@ -84,13 +116,14 @@ def read_health(
     embedding_ready = bool(context.embeddings.loaded)
     reranker_ready = bool(context.reranker.loaded)
     llm_ready = bool(context.llm.loaded)
-    # documents 能力取决于「是否真的有可检索文档」，而不是阶段编号
+    # 阶段 8 前置：documents 表示**子系统可用性**（空库同样 ready），
+    # 可检索数量只用于 chat 是否具备检索语料
     retrievable = _retrievable_documents(context)
     return HealthResponse(
         status="degraded",
         version=settings.app_version,
         capabilities=Capabilities(
-            documents="ready" if retrievable else "unavailable",
+            documents=_documents_capability(context, retrievable),
             chat=_chat_capability(context, retrievable),
             planning=_planning_capability(context),
         ),

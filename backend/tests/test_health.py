@@ -1,8 +1,23 @@
-"""``GET /api/health`` 契约与防泄漏测试。"""
+"""``GET /api/health`` 契约与防泄漏测试。
+
+阶段 8 前置修复轮（BUG-8-PRE-01）明确区分两件事：
+
+- ``capabilities.documents`` = **文档子系统是否可用**（文档结构与文档查询可正常执行；
+  空库同样是 ``ready``，否则 UI_SPEC 2.4 会在空库时禁用 upload / seed，形成启动死锁）；
+- 可检索文档**数量** = 只用于 ``capabilities.chat`` 是否具备检索语料。
+"""
 
 from __future__ import annotations
 
 from fastapi.testclient import TestClient
+from sqlalchemy import func, select
+
+from app.main import create_app
+from app.models import Document, DocumentPipelineState
+from tests.conftest import build_settings, demo_file
+
+RECORDS_ENDPOINT = "/api/academic/records/import"
+XLSX_MIME = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
 
 
 def test_health_returns_200(client: TestClient) -> None:
@@ -15,13 +30,78 @@ def test_health_reports_degraded_without_business_features(client: TestClient) -
 
     assert payload["status"] == "degraded"
     # 阶段 7C：规划路由与确定性引擎已注册 -> planning=ready（空库也成立）。
-    # 没有可检索文档时 chat=unavailable（不是 unconfigured）。
+    # 阶段 8 前置：documents 表示**子系统可用性**，空库同样是 ready（否则上传/seed 被禁用）。
+    # Fake LLM 已配置但没有可检索语料 -> chat=unavailable。
     assert payload["capabilities"] == {
-        "documents": "unavailable",
+        "documents": "ready",
         "chat": "unavailable",
         "planning": "ready",
     }
     assert isinstance(payload["version"], str) and payload["version"]
+
+
+def test_empty_library_reports_documents_ready(client: TestClient) -> None:
+    """空数据库 + 正常文档结构：``documents`` 必须为 ready，retrievable=0 不得降级它。"""
+    payload = client.get("/api/health").json()
+    assert payload["capabilities"]["documents"] == "ready"
+
+
+def test_documents_present_but_none_retrievable_still_ready(
+    client: TestClient, context
+) -> None:
+    """存在文档但没有可检索文档时，``documents`` 仍为 ready，只有 chat 因缺语料不可用。
+
+    使用学业导入建立真实 Document：它有文档行、``retrievable=false``，也没有检查点。
+    """
+    path = demo_file("13-课程记录-匿名学生A")
+    with open(path, "rb") as handle:
+        response = client.post(
+            RECORDS_ENDPOINT, files={"file": (path.name, handle, XLSX_MIME)}
+        )
+    assert response.status_code == 200, response.text
+
+    with context.session_factory() as session:
+        assert session.scalar(select(func.count(Document.id))) == 1
+        assert session.scalar(select(func.count()).select_from(DocumentPipelineState)) == 0
+
+    payload = client.get("/api/health").json()
+    assert payload["capabilities"]["documents"] == "ready"
+    assert payload["capabilities"]["chat"] == "unavailable"
+
+
+def test_documents_ready_is_independent_of_llm_configuration(tmp_path) -> None:
+    """空库 + LLM 未配置的组合正是启动死锁场景：documents 仍须为 ready 以便上传/seed。"""
+    settings = build_settings(tmp_path, llm_provider="openai_compatible", llm_api_key="")
+    application = create_app(settings)
+    with TestClient(application) as client:
+        payload = client.get("/api/health").json()
+    application.state.context.engine.dispose()
+
+    assert payload["capabilities"]["documents"] == "ready"
+    assert payload["capabilities"]["chat"] == "unconfigured"
+    assert payload["status"] == "degraded"
+
+
+def test_health_hides_failures_and_marks_documents_unavailable(
+    client: TestClient, monkeypatch
+) -> None:
+    """文档相关查询确实失败时 -> documents=unavailable，且响应不泄漏 SQL / 路径 / 异常。"""
+
+    def _broken(*_args, **_kwargs):
+        raise RuntimeError("SQL: SELECT COUNT(*) FROM documents -- /app/data/sqlite/app.db")
+
+    monkeypatch.setattr("app.api.health.session_scope", _broken)
+
+    response = client.get("/api/health")
+    assert response.status_code == 200
+    payload = response.json()
+    assert payload["capabilities"]["documents"] == "unavailable"
+    assert payload["capabilities"]["planning"] == "unavailable"
+
+    body = response.text.lower()
+    for leaked in ("select", "/app/", "traceback", "runtimeerror", "sqlite", "documents --"):
+        assert leaked not in body, leaked
+    assert set(payload) == {"status", "version", "capabilities", "providers"}
 
 
 def test_health_reports_provider_devices_and_readiness(client: TestClient) -> None:
