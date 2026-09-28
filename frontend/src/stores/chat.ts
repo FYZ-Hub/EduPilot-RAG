@@ -126,10 +126,25 @@ export const useChatStore = defineStore('chat', () => {
     }),
   )
 
-  /** 只有「最后一条是不完整的助手回答」且服务端没有禁止重试时才提供手动重试。 */
-  const canRetry = computed(
-    () => !streaming.value && retryable.value !== false && lastIncompleteAssistantId() !== null,
-  )
+  /** 是否真的存在「用户可手动重试」的失败；服务端明确 retryable=false 时一律不提供。 */
+  function hasRetryableFailure(): boolean {
+    if (streaming.value || retryable.value === false) {
+      return false
+    }
+    const last = messages.value.at(-1)
+    if (!last) {
+      return false
+    }
+    // 末条是不完整的助手回答（流内错误 / 中断 / 停止）
+    if (last.role === 'assistant') {
+      return !isCompleteAnswer(last)
+    }
+    // 末条是用户问题：只有开流前就失败（网络 / HTTP / 协议错误）时才可重试
+    return streamError.value !== null
+  }
+
+  /** 只有存在可重试的失败时才提供手动重试；已成功的回答不可被程序化重放。 */
+  const canRetry = computed(hasRetryableFailure)
 
   function filterLabel(key: ChatFilterKey, value: string | number): string {
     if (key === 'doc_category') {
@@ -226,20 +241,28 @@ export const useChatStore = defineStore('chat', () => {
   }
 
   /**
-   * 手动重试上一条问题：**只有用户点击才会调用**，绝不自动重试。
+   * 手动重试上一条失败的问题：**只有用户点击才会调用**，绝不自动重试。
+   *
+   * 覆盖两种失败：流内失败（末条是不完整的助手回答）与开流前失败
+   * （网络 / HTTP / 协议错误，此时只有用户问题）。没有可重试失败时是安全空操作，
+   * 因此不会把已经成功的回答重放一次。
    *
    * 不追加新的 user 消息，因此请求历史里不会出现两次同样的问题；
    * 重试成功后新的回答会替代原来的不完整回答，失败时旧内容仍然保留。
    */
   async function retry(): Promise<void> {
-    if (streaming.value) {
+    if (!hasRetryableFailure()) {
       return
     }
-    const lastUser = [...messages.value].reverse().find((message) => message.role === 'user')
-    if (!lastUser) {
+    const last = messages.value.at(-1)
+    const questionText =
+      last?.role === 'user'
+        ? last.content
+        : [...messages.value].reverse().find((message) => message.role === 'user')?.content
+    if (!questionText) {
       return
     }
-    await runTurn(lastUser.content, false)
+    await runTurn(questionText, false)
   }
 
   /** 本轮请求要发送的消息：剔除不完整的助手回答，只保留可用上下文与当前问题。 */

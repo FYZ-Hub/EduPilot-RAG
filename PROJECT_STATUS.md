@@ -326,6 +326,134 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 **8B-2**：Chat 页面布局、消息样式、引用证据面板与来源抽屉（`GET /api/sources/{chunk_id}`），
 实施前必须读取 `docs/UI_SPEC.md` 第 6 节。
 
+## 阶段 8B-2 独立回归修复轮（BUG-8B2-01 / 02 / 03）
+
+阶段 8 = `in_progress`；8A = `completed`；8B-1 = `completed`；**8B-2 = `completed`**；
+**阶段 8B 整体 completed**；**未开始 8C**。
+
+本轮只修复 8B-2 交付中的恢复能力与可访问性缺陷。**未配置或调用真实 LLM**：
+`LLM_BASE_URL` / `LLM_API_KEY` / `LLM_MODEL` 仍为空，未修改任何 `.env`，未下载模型，
+未调用真实外部 API，未发出真实 `/api/chat/stream`（浏览器网络面板与后端日志均零命中），
+未 seed / 上传 / 删除任何数据，未修改后端接口、`PRODUCT_SPEC.md` 或 `UI_SPEC.md`。
+默认环境仍如实为 `status=degraded`、`documents=ready`、**`chat=unconfigured`**、
+`planning=ready`、`counts.retrievable=0`。
+
+### BUG-8B2-01｜流建立前失败没有手动重试入口
+
+- 现象：网络 / HTTP / 协议错误发生在首个 token 之前时，Store 不会创建助手消息，
+  而 `canRetry` 只认「末条为不完整助手消息」；`ChatView` 的页面级 `ErrorAlert` 只有文字没有操作；
+  此时问题已从输入框清空，用户无法重试同一问题。
+- 根因：
+  1. `frontend/src/stores/chat.ts:147`（修复前）`canRetry = !streaming && retryable !== false && lastIncompleteAssistantId() !== null`，
+     开流前失败时 `lastIncompleteAssistantId()` 恒为 `null`；
+  2. `runTurn()` 仅在 `streamingContent !== '' || parser.sawTerminal` 时追加助手消息，
+     开流前失败两者皆假 → 不产生助手消息；
+  3. `frontend/src/views/ChatView.vue:275-279`（修复前）页面级 `ErrorAlert` 无重试按钮；
+  4. `retry()`（修复前）只检查 `streaming`，缺少「确实存在可重试失败」的校验。
+- 修复前真实失败证据：
+  `docker compose exec frontend pnpm vitest run src/components/chat/EvidencePanel.spec.ts src/views/ChatView.spec.ts src/stores/chat.spec.ts`
+  → **`PRE_FIX_EXIT=1`**，`Test Files 3 failed (3)`，`Tests 12 failed | 87 passed (99)`，其中：
+  - `chat store pre-stream recovery > offers a retry when the stream never opened`
+    → `AssertionError: expected false to be true`（`canRetry` 为 false）；
+  - `ChatView answering flow > offers a manual retry when the stream fails before any token`
+    → `Error: Cannot call text on an empty DOMWrapper.`（不存在 `.ep-chat__retry`）。
+- 修复：
+  - `frontend/src/stores/chat.ts:130-146` 新增 `hasRetryableFailure()`：
+    `streaming` 或 `retryable === false` 直接为假；末条是不完整助手回答 → 可重试；
+    末条是用户问题 → **只有 `streamError !== null`**（即开流前失败）才可重试。
+    因此已成功的回答不会被判定为可重试。
+  - `frontend/src/stores/chat.ts:147` `canRetry = computed(hasRetryableFailure)`。
+  - `frontend/src/stores/chat.ts:253-269` `retry()` 先校验 `hasRetryableFailure()`（无失败即安全空操作），
+    再取原问题（末条为用户消息则用它，否则回退到最近一条 user 消息），以 `runTurn(text, false)` 重跑 ——
+    **不追加新的 user 消息**，请求历史中该问题只出现一次。
+  - `frontend/src/views/ChatView.vue:285-296` 页面级 `ErrorAlert` 增加「重试」按钮
+    （`:290` `class="ep-chat__retry"`，仅 `chat.canRetry` 为真时渲染，点击走既有 `onRetry()` → `chat.retry()`）。
+  - 未新增自动重试、resume 或任何后端接口；错误码与真实 `request_id` 原样保留，
+    无服务端编号时仍显示「未获得服务端请求编号」。
+
+### BUG-8B2-02｜证据卡存在鼠标专属操作
+
+- 现象：`EvidencePanel` 的 `<article>` 直接绑定 `@click` 并设 `cursor:pointer`，
+  元素本身不可聚焦、无键盘语义，无法只用键盘选择引用。
+- 根因：`frontend/src/components/chat/EvidencePanel.vue:56`（修复前）把选择行为挂在整个 `<article>` 上，
+  且 `:155` 的 `cursor: pointer` 强化了「只能点击」的交互。
+- 修复前真实失败证据（同一次运行）：
+  - `EvidencePanel > exposes citation selection as a real, tabbable button`
+    → `AssertionError: expected false to be true`（`.ep-evidence-card__select` 不存在）；
+  - `EvidencePanel > keeps the card itself free of mouse-only selection behaviour`
+    → `expected [ [ 1 ] ] to be undefined`（点击卡片本身会触发 `select`）。
+- 修复：
+  - `frontend/src/components/chat/EvidencePanel.vue:56-63` 移除 `<article>` 上的 `@click`，
+    改为内部**真正的** `<button type="button" class="ep-evidence-card__select">`
+    （`:60` `aria-pressed` 反映选中态，`:61` `aria-label="选择引用 N：文件名"`，`:62` 点击 emit `select`）。
+    原生 button 天然 Tab 可聚焦，并由浏览器以 Enter / Space 激活 —— 不建立
+    「role=button 内再嵌套 button」的结构。
+  - `:115` 「查看原文」仍是独立、可聚焦按钮，去掉不再需要的 `@click.stop`；
+    父元素已无点击处理，因此点击它**只**触发一次 `open-source`、不会连带触发 `select`。
+  - `:163-186` 新增 `.ep-evidence-card__select` 按钮重置样式与 `:focus-visible` 可见焦点环；
+    移除 `.ep-evidence-card` 上的 `cursor: pointer` 与已废弃的 `__head` 样式。
+
+### BUG-8B2-03｜Clipboard API 缺失时虚假提示复制成功
+
+- 现象：`await navigator.clipboard?.writeText(...)` 在 `navigator.clipboard` 不存在时
+  会静默短路为 `undefined`（不抛错、不 await 任何写入），随后**无条件**弹出「已复制回答」，
+  用户以为已复制成功。
+- 根因：`frontend/src/views/ChatView.vue:215-217`（修复前）用可选链调用 API，
+  成功分支没有先确认 API 存在。
+- 修复前真实失败证据（同一次运行）：
+  `ChatView answering flow > does not claim success when the clipboard API is unavailable`
+  → `AssertionError: expected "spy" to not be called at all, but actually been called 1 times`（`ElMessage.success`）。
+- 修复：`frontend/src/views/ChatView.vue:213-227` 先检查
+  `navigator.clipboard && typeof navigator.clipboard.writeText === 'function'`，
+  缺失时只提示「当前浏览器不支持写入剪贴板，请手动选择回答文本复制」并 return；
+  仅当 `writeText` resolve 后才提示成功；reject 时提示「复制失败：浏览器未允许写入剪贴板」。
+  复制内容仍**只有回答正文**（`:223` `clipboard.writeText(message.content)`），
+  不含引用元数据、`request_id` 或检索详情。
+
+### 新增测试（17 项）
+
+- `frontend/src/stores/chat.spec.ts`（+5，`chat store pre-stream recovery`）：
+  `offers a retry when the stream never opened`、
+  `offers a retry for an HTTP failure and a protocol failure before the first token`、
+  `retries the failed question without duplicating it and clears the old error`、
+  `treats retry as a safe no-op after a successful answer`、
+  `never offers a retry for an in-stream error the server marked as not retryable`。
+- `frontend/src/views/ChatView.spec.ts`（+7）：
+  `offers a manual retry when the stream fails before any token`、
+  `retries a pre-stream HTTP failure only after the user clicks, then clears the error`、
+  `does not expose any retry action when the server forbids retrying`、
+  `copies only the answer body, never citation metadata or request ids`、
+  `does not claim success when the clipboard API is unavailable`、
+  `does not claim success when writing to the clipboard rejects`、
+  `claims success only after the clipboard write resolves`。
+- `frontend/src/components/chat/EvidencePanel.spec.ts`（+5）：
+  `exposes citation selection as a real, tabbable button`、
+  `reports the pressed state on the select control`、
+  `keeps the card itself free of mouse-only selection behaviour`、
+  `never double-emits when the original text button is used`、
+  `keeps selection and original text as separate controls`；
+  并把既有 `marks the selected card and emits the index when another card is clicked`
+  改为点击 `.ep-evidence-card__select`（交互模型变更的对应调整）。
+
+### 验收
+
+- 定向（3 个文件）：修复前 **退出码 1**（`Tests 12 failed | 87 passed (99)`）→ 修复后
+  **`Tests 99 passed (99)`、`Test Files 3 passed (3)`，退出码 0**。
+- `docker compose exec frontend pnpm test` → **25 files / 273 passed**，退出码 0（上一轮 256，净 +17）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → **675 tests（42 文件）全部通过**，退出码 0（无回归）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示）。
+- 真实浏览器只读复核：`/chat` 正常打开，仍显示真实「当前可检索文档：0」与
+  「大模型尚未配置」中性提示，输入与发送均禁用且原因明确；页面无 `.ep-chat__error`；
+  网络面板**零** `POST /api/chat/stream`；控制台**无未处理错误**；整页无横向溢出。
+  （当前真实环境既无可用 LLM 也无引用，因此证据卡与页面级重试按钮无法在浏览器中真实出现，
+  其键盘/交互行为由 Mock SSE 组件测试与原生 `<button>` 语义共同保证。）
+
+### 下一步
+
+**8C — 学业规划页面**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）。
+
 ## 阶段 8B-2 结论（RAG 问答页面、证据面板与来源原文抽屉）
 
 阶段 8 = `in_progress`；8A = `completed`；8B-1 = `completed`；**8B-2 = `completed`**；

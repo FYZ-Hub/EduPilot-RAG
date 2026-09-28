@@ -211,11 +211,18 @@ function openSource(citation: ChatCitation): void {
 }
 
 async function copyAnswer(message: ChatTurnMessage): Promise<void> {
+  const clipboard = navigator.clipboard
+  if (!clipboard || typeof clipboard.writeText !== 'function') {
+    // 不能声称复制成功：只提示不可用，绝不写入成功文案
+    ElMessage.warning('当前浏览器不支持写入剪贴板，请手动选择回答文本复制')
+    return
+  }
   try {
-    await navigator.clipboard?.writeText(message.content)
+    // 只复制回答正文，不含引用元数据、request_id 或检索详情
+    await clipboard.writeText(message.content)
     ElMessage.success('已复制回答')
   } catch {
-    ElMessage.warning('浏览器未允许写入剪贴板')
+    ElMessage.warning('复制失败：浏览器未允许写入剪贴板')
   }
 }
 
@@ -276,7 +283,17 @@ onBeforeUnmount(() => {
       class="ep-chat__error"
       :error="pageError"
       title="问答请求失败"
-    />
+    >
+      <!-- 开流前失败（网络 / HTTP / 协议错误）同样必须能手动重试，且绝不自动重试 -->
+      <ElButton
+        v-if="chat.canRetry"
+        class="ep-chat__retry"
+        size="small"
+        @click="onRetry"
+      >
+        重试
+      </ElButton>
+    </ErrorAlert>
 
     <div class="ep-chat__layout">
       <div class="ep-chat__main">

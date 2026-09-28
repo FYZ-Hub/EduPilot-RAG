@@ -53,12 +53,17 @@ function rowRange(citation: ChatCitation): string | null {
         :key="citation.citation_index"
         class="ep-evidence-card"
         :class="{ 'is-selected': selectedIndex === citation.citation_index }"
-        @click="emit('select', citation.citation_index)"
       >
-        <header class="ep-evidence-card__head">
+        <button
+          type="button"
+          class="ep-evidence-card__select"
+          :aria-pressed="selectedIndex === citation.citation_index"
+          :aria-label="`选择引用 ${citation.citation_index}：${citation.file_name}`"
+          @click="emit('select', citation.citation_index)"
+        >
           <span class="ep-evidence-card__index">[{{ citation.citation_index }}]</span>
           <span class="ep-evidence-card__file">{{ citation.file_name }}</span>
-        </header>
+        </button>
 
         <dl class="ep-evidence-card__meta">
           <div v-if="hasText(citation.document_version)" class="ep-evidence-card__meta-item">
@@ -107,7 +112,7 @@ function rowRange(citation: ChatCitation): string | null {
           size="small"
           text
           type="primary"
-          @click.stop="emit('open-source', citation)"
+          @click="emit('open-source', citation)"
         >
           查看原文
         </ElButton>
@@ -152,20 +157,38 @@ function rowRange(citation: ChatCitation): string | null {
   border: 1px solid var(--ep-color-border);
   border-radius: var(--ep-radius-card);
   background: #fff;
+}
+
+/* 选择引用是真正的 button：Tab 可聚焦，Enter / Space 原生激活（UI_SPEC 9 / 11.3） */
+.ep-evidence-card__select {
+  display: flex;
+  gap: var(--ep-space-2);
+  align-items: baseline;
+  width: 100%;
+  min-width: 0;
+  padding: 0;
+  border: 0;
+  background: transparent;
+  color: inherit;
+  font: inherit;
+  text-align: left;
   cursor: pointer;
+}
+
+.ep-evidence-card__select:hover .ep-evidence-card__file {
+  color: var(--ep-color-primary);
+}
+
+.ep-evidence-card__select:focus-visible {
+  outline: 2px solid var(--ep-color-primary);
+  outline-offset: 2px;
+  border-radius: 4px;
 }
 
 .ep-evidence-card.is-selected {
   border-color: var(--ep-color-evidence);
   box-shadow: inset 3px 0 0 var(--ep-color-evidence);
   background: var(--ep-color-evidence-soft);
-}
-
-.ep-evidence-card__head {
-  display: flex;
-  gap: var(--ep-space-2);
-  align-items: baseline;
-  min-width: 0;
 }
 
 .ep-evidence-card__index {

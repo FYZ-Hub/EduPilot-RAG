@@ -1,6 +1,6 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
-import ElementPlus from 'element-plus'
+import ElementPlus, { ElMessage } from 'element-plus'
 import { createPinia } from 'pinia'
 import { createMemoryHistory } from 'vue-router'
 
@@ -750,6 +750,76 @@ describe('ChatView answering flow', () => {
     wrapper.unmount()
   })
 
+  it('offers a manual retry when the stream fails before any token', async () => {
+    mocks.streamChat.mockRejectedValue(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '唯一的问题')
+
+    const alert = wrapper.find('.ep-chat__error')
+    expect(alert.exists()).toBe(true)
+    expect(alert.text()).toContain('未获得服务端请求编号')
+    expect(alert.find('.ep-chat__retry').text()).toContain('重试')
+    // 绝不能自动重试
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('retries a pre-stream HTTP failure only after the user clicks, then clears the error', async () => {
+    mocks.streamChat.mockRejectedValueOnce(
+      new ApiError('问答能力未配置', {
+        kind: 'http',
+        status: 503,
+        code: 'LLM_PROVIDER_UNAVAILABLE',
+        requestId: 'req-http-9',
+      }),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '唯一的问题')
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+    expect(wrapper.find('.ep-chat__error').text()).toContain('req-http-9')
+
+    mocks.streamChat.mockResolvedValueOnce(
+      responseOf([frame('token', { text: '成功回答' }), frame('done', donePayload)]),
+    )
+    await wrapper.find('.ep-chat__error .ep-chat__retry').trigger('click')
+    await flushPromises()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(2)
+    const retryBody = mocks.streamChat.mock.calls[1][0] as { messages: Array<{ content: string }> }
+    expect(retryBody.messages.filter((item) => item.content === '唯一的问题')).toHaveLength(1)
+    expect(retryBody.messages).toHaveLength(1)
+
+    expect(wrapper.find('.ep-chat__error').exists()).toBe(false)
+    expect(wrapper.findAll('.ep-msg--user')).toHaveLength(1)
+    expect(wrapper.findAll('.ep-msg--assistant')).toHaveLength(1)
+    expect(wrapper.find('.ep-msg--assistant').text()).toContain('成功回答')
+    wrapper.unmount()
+  })
+
+  it('does not expose any retry action when the server forbids retrying', async () => {
+    mocks.streamChat.mockResolvedValue(
+      responseOf([
+        frame('error', {
+          code: 'MODEL_RESPONSE_INVALID',
+          message: '模型响应不符合引用协议',
+          retryable: false,
+          request_id: 'req-nr-2',
+        }),
+      ]),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '问题')
+
+    expect(wrapper.find('.ep-msg__action--retry').exists()).toBe(false)
+    expect(wrapper.find('.ep-chat__retry').exists()).toBe(false)
+    wrapper.unmount()
+  })
+
   it('copies only the answer text', async () => {
     const writeText = vi.fn().mockResolvedValue(undefined)
     Object.defineProperty(navigator, 'clipboard', {
@@ -766,6 +836,96 @@ describe('ChatView answering flow', () => {
     await flushPromises()
 
     expect(writeText).toHaveBeenCalledWith('毕业总学分为 155.0')
+    wrapper.unmount()
+  })
+
+  it('copies only the answer body, never citation metadata or request ids', async () => {
+    const writeText = vi.fn().mockResolvedValue(undefined)
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    mocks.streamChat.mockResolvedValue(
+      responseOf([
+        frame('citation', citation()),
+        frame('token', { text: '毕业总学分为 155.0' }),
+        frame('done', donePayload),
+      ]),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '问题')
+    await wrapper.find('.ep-msg__action--copy').trigger('click')
+    await flushPromises()
+
+    const copied = writeText.mock.calls[0][0] as string
+    expect(copied).toBe('毕业总学分为 155.0')
+    expect(copied).not.toContain('01-培养方案.pdf')
+    expect(copied).not.toContain('req-ok')
+    expect(copied).not.toContain('chunk-')
+    wrapper.unmount()
+  })
+
+  it('does not claim success when the clipboard API is unavailable', async () => {
+    Object.defineProperty(navigator, 'clipboard', { value: undefined, configurable: true })
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({}) as never)
+    const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => ({}) as never)
+    mocks.streamChat.mockResolvedValue(
+      responseOf([frame('token', { text: '毕业总学分为 155.0' }), frame('done', donePayload)]),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '问题')
+    await wrapper.find('.ep-msg__action--copy').trigger('click')
+    await flushPromises()
+
+    expect(success).not.toHaveBeenCalled()
+    expect(warning).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('does not claim success when writing to the clipboard rejects', async () => {
+    const writeText = vi.fn().mockRejectedValue(new Error('denied'))
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({}) as never)
+    const warning = vi.spyOn(ElMessage, 'warning').mockImplementation(() => ({}) as never)
+    mocks.streamChat.mockResolvedValue(
+      responseOf([frame('token', { text: '毕业总学分为 155.0' }), frame('done', donePayload)]),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '问题')
+    await wrapper.find('.ep-msg__action--copy').trigger('click')
+    await flushPromises()
+
+    expect(writeText).toHaveBeenCalledWith('毕业总学分为 155.0')
+    expect(success).not.toHaveBeenCalled()
+    expect(warning).toHaveBeenCalled()
+    wrapper.unmount()
+  })
+
+  it('claims success only after the clipboard write resolves', async () => {
+    let resolveWrite: (() => void) | null = null
+    const writeText = vi.fn(
+      () =>
+        new Promise<void>((resolve) => {
+          resolveWrite = resolve
+        }),
+    )
+    Object.defineProperty(navigator, 'clipboard', { value: { writeText }, configurable: true })
+    const success = vi.spyOn(ElMessage, 'success').mockImplementation(() => ({}) as never)
+    mocks.streamChat.mockResolvedValue(
+      responseOf([frame('token', { text: '毕业总学分为 155.0' }), frame('done', donePayload)]),
+    )
+    const wrapper = await mountReady()
+
+    await ask(wrapper, '问题')
+    await wrapper.find('.ep-msg__action--copy').trigger('click')
+    await flushPromises()
+
+    expect(success).not.toHaveBeenCalled()
+
+    resolveWrite!()
+    await flushPromises()
+
+    expect(success).toHaveBeenCalled()
     wrapper.unmount()
   })
 

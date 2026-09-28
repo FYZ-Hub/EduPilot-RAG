@@ -1008,6 +1008,114 @@ describe('chat store manual retry', () => {
   })
 })
 
+describe('chat store pre-stream recovery', () => {
+  beforeEach(() => {
+    mocks.streamChat.mockReset()
+    mocks.fetchRetrievalOptions.mockReset()
+  })
+
+  it('offers a retry when the stream never opened', async () => {
+    mocks.streamChat.mockRejectedValue(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const store = mountStore()
+    store.question = '唯一的问题'
+
+    await store.send()
+
+    expect(store.messages).toHaveLength(1)
+    expect(store.streamError).not.toBeNull()
+    expect(store.canRetry).toBe(true)
+  })
+
+  it('offers a retry for an HTTP failure and a protocol failure before the first token', async () => {
+    mocks.streamChat.mockRejectedValueOnce(
+      new ApiError('问答能力未配置', {
+        kind: 'http',
+        status: 503,
+        code: 'LLM_PROVIDER_UNAVAILABLE',
+        requestId: 'req-http-1',
+      }),
+    )
+    const httpStore = mountStore()
+    httpStore.question = '问题'
+    await httpStore.send()
+    expect(httpStore.canRetry).toBe(true)
+    expect(httpStore.streamError?.requestId).toBe('req-http-1')
+
+    mocks.streamChat.mockResolvedValueOnce(streamOf([frame('delta', { text: 'x' })]))
+    const protocolStore = mountStore()
+    protocolStore.question = '问题'
+    await protocolStore.send()
+    expect(protocolStore.streamError?.code).toBe('CHAT_STREAM_PROTOCOL_ERROR')
+    expect(protocolStore.canRetry).toBe(true)
+  })
+
+  it('retries the failed question without duplicating it and clears the old error', async () => {
+    mocks.streamChat.mockRejectedValueOnce(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const store = mountStore()
+    store.question = '唯一的问题'
+    await store.send()
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([frame('token', { text: '成功回答' }), frame('done', donePayload)]),
+    )
+    await store.retry()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(2)
+    const retryBody = mocks.streamChat.mock.calls[1][0] as { messages: ChatMessagePayload[] }
+    expect(retryBody.messages.filter((item) => item.content === '唯一的问题')).toHaveLength(1)
+    expect(retryBody.messages).toHaveLength(1)
+
+    expect(store.streamError).toBeNull()
+    expect(store.messages).toHaveLength(2)
+    expect(store.messages.filter((item) => item.role === 'user')).toHaveLength(1)
+    expect(store.messages.filter((item) => item.role === 'assistant')).toHaveLength(1)
+    expect(store.messages[1].content).toBe('成功回答')
+    expect(store.canRetry).toBe(false)
+  })
+
+  it('treats retry as a safe no-op after a successful answer', async () => {
+    mocks.streamChat.mockResolvedValue(
+      streamOf([frame('token', { text: '回答' }), frame('done', donePayload)]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+    await store.send()
+
+    expect(store.canRetry).toBe(false)
+    await store.retry()
+
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+    expect(store.messages).toHaveLength(2)
+  })
+
+  it('never offers a retry for an in-stream error the server marked as not retryable', async () => {
+    mocks.streamChat.mockResolvedValueOnce(
+      streamOf([
+        frame('error', {
+          code: 'MODEL_RESPONSE_INVALID',
+          message: '模型响应不符合引用协议',
+          retryable: false,
+          request_id: 'req-nr-1',
+        }),
+      ]),
+    )
+    const store = mountStore()
+    store.question = '问题'
+    await store.send()
+
+    expect(store.retryable).toBe(false)
+    expect(store.canRetry).toBe(false)
+
+    await store.retry()
+    expect(mocks.streamChat).toHaveBeenCalledTimes(1)
+  })
+})
+
 describe('chat store filters', () => {
   beforeEach(() => {
     mocks.streamChat.mockReset()

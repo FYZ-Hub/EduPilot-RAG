@@ -104,8 +104,56 @@ describe('EvidencePanel', () => {
     expect(cards[0].classes()).toContain('is-selected')
     expect(cards[1].classes()).not.toContain('is-selected')
 
-    await cards[1].trigger('click')
+    await cards[1].find('.ep-evidence-card__select').trigger('click')
     expect(wrapper.emitted('select')).toEqual([[2]])
+  })
+
+  it('exposes citation selection as a real, tabbable button', () => {
+    const wrapper = mountPanel([citation()])
+    const control = wrapper.find('.ep-evidence-card__select')
+
+    expect(control.exists()).toBe(true)
+    expect(control.element.tagName).toBe('BUTTON')
+    expect(control.attributes('type')).toBe('button')
+    expect((control.element as HTMLElement).tabIndex).toBeGreaterThanOrEqual(0)
+    expect(control.attributes('aria-label')).toContain('1')
+    expect(control.text()).toContain('01-培养方案.pdf')
+  })
+
+  it('reports the pressed state on the select control', () => {
+    const selected = mountPanel([citation()], 1)
+    expect(selected.find('.ep-evidence-card__select').attributes('aria-pressed')).toBe('true')
+
+    const unselected = mountPanel([citation()], null)
+    expect(unselected.find('.ep-evidence-card__select').attributes('aria-pressed')).toBe('false')
+  })
+
+  it('keeps the card itself free of mouse-only selection behaviour', async () => {
+    const wrapper = mountPanel([citation()])
+
+    await wrapper.find('.ep-evidence-card').trigger('click')
+
+    expect(wrapper.emitted('select')).toBeUndefined()
+    expect(wrapper.find('.ep-evidence-card').attributes('role')).toBeUndefined()
+  })
+
+  it('never double-emits when the original text button is used', async () => {
+    const wrapper = mountPanel([citation()])
+
+    await wrapper.find('.ep-evidence-card__open').trigger('click')
+
+    expect(wrapper.emitted('open-source')).toHaveLength(1)
+    expect(wrapper.emitted('select')).toBeUndefined()
+  })
+
+  it('keeps selection and original text as separate controls', async () => {
+    const wrapper = mountPanel([citation()])
+
+    await wrapper.find('.ep-evidence-card__select').trigger('click')
+    await wrapper.find('.ep-evidence-card__open').trigger('click')
+
+    expect(wrapper.emitted('select')).toEqual([[1]])
+    expect(wrapper.emitted('open-source')).toHaveLength(1)
   })
 
   it('requests the original text only when the user asks for it', async () => {
