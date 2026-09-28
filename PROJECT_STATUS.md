@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2 已完成，8B 整体完成；8C、8D 未开始）**
-- 下一阶段：**阶段 8C — 学业规划页面**（必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）
+- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2、8C-1 已完成，8B 整体完成；8C-2、8D 未开始）**
+- 下一阶段：**阶段 8C-2 — 学业规划页面布局与结果展示**（必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）
 - 最近更新：2026-09-28
 
 ## 阶段状态
@@ -453,6 +453,124 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 ### 下一步
 
 **8C — 学业规划页面**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）。
+
+## 阶段 8C-1 结论（学业规划前端接口、状态机与确定性展示辅助层）
+
+阶段 8 = `in_progress`；8A / 8B-1 / 8B-2 = `completed`；**8C-1 = `completed`**；
+**8C-2 尚未开始**（未实现结果卡、类别进度条、缺失课程表格、证据面板与浏览器视觉验收）。
+本轮只建立前端数据基础：接口契约、选择恢复纯函数、学分与进度展示辅助纯函数、Pinia 状态机；
+**未重写 `PlanningView.vue`**，未修改任何后端接口、`PRODUCT_SPEC.md` 或 `UI_SPEC.md`。
+
+### 开始前基线
+
+- `git status --short` 为空；`git rev-parse --short HEAD` = `1eb1a79`。
+- `docker compose ps` → backend `Up (healthy)`、frontend `Up`。
+- `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`（真实值，未伪造）。
+- `GET /api/academic/options` → `{"record_sets":[],"rule_sets":[]}`（空数组是合法状态）。
+
+### 实现前失败测试
+
+- 命令：`docker compose exec frontend pnpm vitest run src/api/academic.spec.ts src/domain/academic.spec.ts src/stores/academic.spec.ts`
+- 关键输出：`Test Files 3 failed (3)`、`Tests no tests`、
+  `Error: Failed to resolve import "./academic" from "src/api/academic.spec.ts". Does the file exist?`
+- 退出码：**1**
+
+### API 契约（`frontend/src/api/academic.ts`）
+
+- `GET /api/academic/options` 顶层**只有** `record_sets` / `rule_sets`：
+  `RecordSetOption{id,name,source_doc_id,status,updated_at}`、
+  `RuleSetOption{id,name,major,admission_year,rule_version,effective_from,source_doc_id,status}`；
+  **不**增加默认选中项、学生身份、路径、哈希或 `source_key`。
+- `POST /api/academic/records/import`：固定 `multipart/form-data`，`file` 必填、`name` 可选；
+  `name` 去空白后为空时**完全不发送**该字段；客户端只允许 XLSX（`RECORD_IMPORT_EXTENSIONS=['xlsx']`）；
+  必须调用 academic 端点，**不**走 `POST /api/documents`。
+- `POST /api/academic/rules/import`：同样 multipart；规则允许 PDF / DOCX / XLSX
+  （`RULE_IMPORT_EXTENSIONS=['pdf','docx','xlsx']`），不进入普通 RAG 上传流水线。
+- 两者响应严格建模为 `ImportResult{id,status,warnings}`，不增删字段。
+- `POST /api/academic/plan`：请求体**严格**只有 `{record_set_id, rule_set_id}`；
+  即使调用方注入额外键也只发送这两个字段（禁止 name / major / rule_version / 文件信息）。
+- `PlanningResult` 顶层**严格 8 项**；子结构逐字段对齐 PRODUCT_SPEC 5.2：
+  `MissingRequiredCourse{course_code,course_name,credits,category,evidence_chunk_ids}`、
+  `CategoryGap{category,required_credits,completed_credits,in_progress_credits,remaining_credits}`、
+  `ConflictWarning{code,message,severity,evidence_chunk_ids}`、
+  `PlanningEvidence{chunk_id,doc_id,file_name,document_version,effective_from,page_number,sheet_name,row_start,row_end,section_title,quote}`。
+- 客户端**不**重算、修正或覆盖任何 `PlanningResult` 数字；结果原样透传并原样保存。
+
+### URL 选择恢复规则（`frontend/src/domain/academic.ts::resolveAcademicSelection`）
+
+| 输入 | 结果 |
+|---|---|
+| query ID 在对应 options 中存在 | 保留该 ID，`stale=false` |
+| query ID 不存在 | 清除为 `null` 并置 `stale=true`（**不**自动改选其它项） |
+| 无 query 且恰好只有 1 个 `ready` 选项 | 预选该唯一项 |
+| 无 query 且 0 个或 ≥2 个候选 | 保持未选择（不选第一个 / 最后一个 / 最新版本） |
+
+record 与 rule **独立判断**；纯函数不修改入参 options、不读写浏览器 URL（URL 同步留给 8C-2），
+相同输入必然产生相同输出。
+
+### 学分展示辅助（纯函数，不写回 `PlanningResult`）
+
+- `summariseCredits(result)`：四个学分必须是**有限非负数**（负数 / `NaN` / `±Infinity` → `valid=false` + 说明）；
+  `required=0` 且存在非零进度 → 数据错误；`completed + in_progress > required` **不算错误**，返回 `exceeded=true`。
+- `buildProgressBreakdown(result)` 三段比例（`completed / in_progress / remaining`）：
+  `completed` 段封顶 `required`（≤100%）；`in_progress` 段封顶剩余空间；
+  `remaining` 段补足到 `required`；总宽恒 ≤ 100%；`required=0` 时三段全为 0。
+  归一化比例**只用于展示**，绝不写回或改写服务端结果。
+
+### Academic Store（`frontend/src/stores/academic.ts`）
+
+状态：`options` / `optionsLoading` / `optionsError` / `selectedRecordSetId` / `selectedRuleSetId` /
+`staleRecordSelection` / `staleRuleSelection` / `result` / `calculating` / `calculationError` /
+`resultNotUpdated` / `importingRecords` / `importingRules` / `importRecordsError` / `importRulesError`。
+
+- `loadOptions()`：调用真实 options API；新请求**中止**旧请求（`AbortController` + 序号守卫），
+  旧响应**绝不**覆盖新状态；`cancel()` / 卸载可中止且**不算错误**；options 为空是合法 empty，不是错误。
+- 选择：**不**自行选择「最新规则」；多选项时保持 `null` 等待用户显式选择；
+  刷新后已消失的选择被清除并标记 stale；只有一个 `ready` 选项时可预选；
+  `selectRecordSet` / `selectRuleSet` 清除对应 stale。
+- `importRecords(file, name?)` / `importRules(file, name?)`：各自独立的并发闸门
+  （重复并发提交直接返回 `null`）；成功后才 `loadOptions()` 刷新且**不**自动选择新项目；
+  失败保留真实 `code` / `message` / `request_id`；不输出文件正文、路径或身份字段。
+- `calculate()`：两个 ID 不齐全时**不发请求**；同一时间只允许一个计算请求；
+  请求体严格只有两个 ID；成功时**原样**保存 `PlanningResult`；
+  重算期间保留上一份成功结果；重算失败保留旧结果并置 `resultNotUpdated=true`；
+  首次失败 `result` 仍为 `null`；新的成功结果才覆盖旧结果并清除旧错误与「未更新」标记；**不自动重试**。
+- 全程**不调用** LLM / Chat / Embedding / Reranker，不在客户端做任何学分计算。
+
+### 新增测试
+
+| 文件 | 数量 | 覆盖 |
+|---|---|---|
+| `frontend/src/api/academic.spec.ts` | 10 | options 端点与空数组透传 / records multipart 且空白 name 不发送 / name 去空白 / rules multipart / 扩展名常量 / plan 严格两 key 且忽略注入键 / `PlanningResult` 原样透传 |
+| `frontend/src/domain/academic.spec.ts` | 21 | 选择恢复 9 项（有效 / 无效 / 单选项预选 / 多选项不静默选择 / 非 ready 不预选 / record 与 rule 独立 / 缺失视为未提供 / 不改输入且可重复 / 空 options）+ 学分校验 6 项 + 进度比例 6 项 |
+| `frontend/src/stores/academic.spec.ts` | 18 | options loading / success / empty / error / 旧响应不覆盖新响应 / 消失选择被清除 / 多选项不自动选择 / cancel 不产生未处理错误；import 成功刷新 options / 保留真实错误码与 request_id / 防重复并发 / records 与 rules 分离；calculate ID 不齐不发请求 / 请求严格 / 首次失败无结果 / 重算失败保留旧结果并标记未更新 / 成功后清除错误与标记 / 同时只跑一个且不自动重试 / cancel 中止计算 |
+
+### 验收
+
+- 实现前定向测试：退出码 **1**（`Test Files 3 failed (3)`、`Tests no tests`、`Failed to resolve import "./academic"`）。
+- 实现后定向测试（同 3 个文件）→ **`Test Files 3 passed (3)`、`Tests 49 passed (49)`**，退出码 0。
+- `docker compose exec frontend pnpm test` → **28 files / 322 passed**，退出码 0（上一轮 256，净 +66）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → 退出码 0（**675 passed, 1 warning**，无回归；本轮未改后端）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`；
+  `GET /api/academic/options`（只读）→ `{"record_sets":[],"rule_sets":[]}`；`git diff --check` 无输出。
+- 说明：前端源码是**构建进镜像**的（`frontend` 服务没有源码挂载），因此本轮先
+  `docker compose build frontend` + `docker compose up -d frontend` 让容器与仓库一致，
+  再执行容器内测试与构建；未新增依赖，`pnpm-lock.yaml` 未变。
+
+### 安全边界（本轮严格遵守）
+
+未修改任何 `.env`；未配置或调用真实 LLM（`chat` 仍为 `unconfigured`）；未下载模型；
+未调用真实外部 API；未真实导入任何 academic 文件；未 seed、未上传、未删除任何文档；
+未修改后端接口、`PRODUCT_SPEC.md` 或 `UI_SPEC.md`；未在浏览器重算学分；
+未新增 `v-html` / `innerHTML` / console 日志或任何新依赖；所有测试使用 mock fetch / mock API。
+**未开始 8C-2**（无 `PlanningView.vue` 改动、无结果卡 / 类别进度条 / 缺失课程表格 / 证据面板）。
+
+### 下一步
+
+**8C-2 — 学业规划页面布局与结果展示**：读取 URL query 并用本轮纯函数恢复选择、
+选择器与导入对话框、结果卡、类别进度条、缺失课程表格、冲突与证据面板、浏览器视觉验收。
 
 ## 阶段 8B-2 结论（RAG 问答页面、证据面板与来源原文抽屉）
 
