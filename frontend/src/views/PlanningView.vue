@@ -13,14 +13,14 @@ import PageHeader from '@/components/common/PageHeader.vue'
         type="info"
         :closable="false"
         show-icon
-        title="功能将在后续阶段实现"
-        description="课程记录与培养规则导入、确定性学分计算将在阶段 7 与阶段 8 实现。本阶段不显示任何学分数字。"
+        title="规划页面尚未接入"
+        description="课程记录与培养规则导入、确定性学分计算界面尚未实现；本页不展示任何学分、缺口或规划结果。"
       />
 
       <div class="ep-placeholder">
         <ElIcon :size="24"><DataAnalysis /></ElIcon>
-        <p class="ep-placeholder__title">尚未接入学业规划能力</p>
-        <p>当前健康接口如实返回 planning = unavailable，因此这里不展示任何学分、缺口或规划结果。</p>
+        <p class="ep-placeholder__title">暂未提供规划结果</p>
+        <p>在规划界面接入前，这里不展示任何学分数字或证据来源。</p>
       </div>
     </div>
   </section>

@@ -4,10 +4,15 @@ import { RouterView, useRoute } from 'vue-router'
 import { Menu as MenuIcon, Reading } from '@element-plus/icons-vue'
 
 import AppNav from '@/components/common/AppNav.vue'
+import { describeDatasetState } from '@/domain/demoState'
+import { useDemoStore } from '@/stores/demo'
+import { useDocumentsStore } from '@/stores/documents'
 import { useHealthStore } from '@/stores/health'
 
 const route = useRoute()
 const health = useHealthStore()
+const documents = useDocumentsStore()
+const demo = useDemoStore()
 
 const drawerOpen = ref(false)
 
@@ -35,8 +40,30 @@ const statusText = computed(() => {
   }
 })
 
+/** 侧栏概况：只用真实文档列表与 demo status，未就绪时不展示任何数字。 */
+const summaryText = computed(() => {
+  if (documents.loaded) {
+    return `可检索 ${documents.retrievableCount} / 共 ${documents.total}`
+  }
+  return documents.error ? '知识库概况暂不可用' : '正在读取知识库概况…'
+})
+
+const datasetText = computed(() => {
+  const state = demo.state
+  if (state) {
+    return describeDatasetState(state).label
+  }
+  return demo.statusError ? '演示数据状态不可用' : '正在读取演示数据状态…'
+})
+
 onMounted(() => {
   void health.load()
+  if (!documents.loaded) {
+    void documents.load()
+  }
+  if (!demo.status) {
+    void demo.loadStatus()
+  }
 })
 </script>
 
@@ -55,9 +82,10 @@ onMounted(() => {
 
       <AppNav />
 
-      <div class="ep-sidebar__footer">
+      <div class="ep-sidebar__footer" aria-label="知识库概况">
         <p class="ep-sidebar__footer-title">知识库概况</p>
-        <p class="ep-sidebar__footer-hint">阶段 1 尚未接入文档接口，暂无可用文档数据。</p>
+        <p class="ep-sidebar__footer-hint">{{ summaryText }}</p>
+        <p class="ep-sidebar__footer-hint">演示数据：{{ datasetText }}</p>
       </div>
     </aside>
 
@@ -98,11 +126,9 @@ onMounted(() => {
           :closable="false"
           show-icon
           title="后端服务不可连接"
-          description="写操作已禁用，只读页面仍可使用。"
         >
-          <template #default>
-            <ElButton size="small" @click="health.load()">重新检测</ElButton>
-          </template>
+          <p class="ep-content__alert-text">写操作已禁用，只读页面仍可使用。</p>
+          <ElButton size="small" @click="health.load()">重新检测</ElButton>
         </ElAlert>
 
         <RouterView />
@@ -270,6 +296,10 @@ onMounted(() => {
 
 .ep-content__alert {
   margin-bottom: var(--ep-space-4);
+}
+
+.ep-content__alert-text {
+  margin-bottom: var(--ep-space-2);
 }
 
 .ep-topbar__menu {

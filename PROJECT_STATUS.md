@@ -2,9 +2,9 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 7 已完成（7A、7B-1、7B-2、7C 全部完成）**
-- 下一阶段：**阶段 8 — Vue 核心页面**（知识库管理 / RAG 问答 / 学业规划，实施前必须读取 `docs/UI_SPEC.md`）
-- 最近更新：2026-09-27
+- 当前阶段：**阶段 8 进行中（8A 已完成；8B / 8C / 8D 未开始）**
+- 下一阶段：**阶段 8B — RAG 问答页面**（必须读取 `docs/UI_SPEC.md` 第 6 节）
+- 最近更新：2026-09-28
 
 ## 阶段状态
 
@@ -18,9 +18,126 @@
 | 5 | Reranker | completed |
 | 6 | SSE 问答与引用 | completed |
 | 7 | 确定性学分规则引擎 | completed |
-| 8 | Vue 核心页面 | not_started |
+| 8 | Vue 核心页面 | in_progress |
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 8A 结论（Vue 应用框架完善 + 知识库管理页面）
+
+阶段 8 = `in_progress`，8A = `completed`，下一步为 **8B RAG 问答页面**。
+本轮只实现 UI_SPEC 第 2–5 节的共享框架与知识库管理页面；**未实现** SSE 问答页面、
+学业规划页面、导入/结果界面，未修改任何后端业务契约。
+
+### 集中 API 层
+
+- `frontend/src/api/client.ts`：`API_BASE_URL` **只在此处定义一次**（`VITE_API_BASE_URL`，
+  缺省 `http://localhost:8000/api`）；支持 GET / JSON POST / multipart POST / DELETE；
+  统一解析错误体 `{code, message, details, request_id}`。
+- `ApiError` 保留 `kind`（`http` / `network` / `aborted`）、HTTP `status`、机器错误码 `code`、
+  服务端 `message`、`requestId`、`details`；`requestIdLabel` 在服务端错误时显示真实请求编号，
+  网络 / 取消 / CORS 阻断时明确显示「未获得服务端请求编号」，**前端绝不生成 request_id**。
+- multipart 不手动设置 `Content-Type`（浏览器补 boundary）；204 返回 `undefined`；
+  不打印请求体、文件正文、路径或密钥；未新增 API Key、未修改 `.env`、未引入远程字体 / 图片 / CDN。
+- 新增 `api/documents.ts`、`api/demo.ts`：DTO 字段与 `backend/app/documents/service.py`、
+  `backend/app/demo/service.py` 的真实返回逐一对应（未猜测、未补默认值）。
+
+### 共享应用框架
+
+- 路由保持 `/` → `/knowledge`、`/knowledge`、`/chat`、`/planning` 与 404；
+  桌面 224px 侧栏 / 64px 顶栏，768–1199px 72px 图标侧栏，<768px 顶部菜单 + 导航抽屉；
+  保留「跳到主要内容」与当前导航 `aria-current="page"`。
+- **侧栏底部「知识库概况」改为真实数据**：可检索数 / 总数来自 `GET /api/documents`，
+  演示数据状态来自 `GET /api/demo/status`；未加载或不可达时显示「正在读取… / 暂不可用」，
+  不显示任何伪造数字（移除了「阶段 1 尚未接入」占位）。
+- 顶部状态严格来自 `/api/health`；后端不可达时显示固定错误条、提供「重新检测」并禁用写操作；
+  Provider / 设备标签只在健康接口真实返回时展示；不显示虚构用户、学校、通知数或统计。
+- `ChatView` / `PlanningView` 仍为占位，但已删除失效的阶段编号与
+  「planning = unavailable」表述，并在真实浏览器中确认 `/chat`、`/planning` 正文不含 `阶段 N`。
+
+### 通用组件
+
+新增 `AsyncState`、`StatusTag`、`ErrorAlert`、`FileUploader`、`JobProgressPanel`、
+`DocumentPreviewDrawer`、`ConfirmDeleteDialog`：显式区分 loading / error / empty / disabled /
+partial / success；图标按钮与表单控件具备可见 label 与 `aria-label`；请求期间按钮 loading 并阻止重复提交；
+弹窗 / 抽屉关闭后焦点返回触发按钮；所有后端文本按纯文本渲染（有源码级 `v-html` 守卫测试）。
+
+### KnowledgeView（UI_SPEC 第 5 节）
+
+- 页面加载读取 `/api/health`、`/api/documents`、`/api/demo/status`；**不自动 seed**。
+- 统计卡直接绑定 `total` / `counts.retrievable` / `counts.processing` / `counts.failed`；
+  **未使用 `counts.ready` 顶替 `retrievable`**；空库显示真实 `0`。
+- 演示数据：Dataset `state` / Job `status` / Job document `status`、`result` 为**三套独立类型**，
+  完整支持 8 种 Dataset 状态到按钮、文案与可用性的映射；`loaded` 只来自 `demo status.loaded`；
+  job 终态后重新读取 demo status 并刷新文档列表；`serving_previous_version` 显示当前仍服务旧版本；
+  只调用 `POST /api/demo/seed`（未发明 reset / resume / cancel / rebuild 接口）。
+- 轮询：同一任务只有一个 timer；终态 / 页面卸载 / 任务切换即停止；按 `poll_after_seconds`
+  （缺失固定 2 秒）；网络失败显示「正在重新连接」并做有上限退避，连续 3 次失败后暂停并提供
+  「重新连接」；job 404 时重新获取 demo status 再按 `active_job_id` / `last_job_id` 恢复；
+  **网络失败不会把 job 写成 failed**。
+- 上传：560px 对话框，PDF / DOCX / XLSX，拖拽或选择多文件，客户端预检扩展名与单文件 50MB，
+  每文件独立调用 `POST /api/documents`，按 `disposition` 显示已受理 / 文档已存在 / 已连接现有任务 /
+  已开始恢复；`DOCUMENT_RETRY_NOT_ALLOWED` 不自动重试并要求更换文件；全部成功才关闭并刷新，
+  部分失败保留对话框并允许逐项重试。
+- 列表：默认按 `updated_at` 倒序，300ms 文件名搜索防抖，来源 / 类型 / 状态本地筛选（无服务端分页）；
+  状态映射严格依据 `status` / `retrievable` / `activation_state`（`retrievable=true` 才是「可检索」，
+  ready+candidate 为「已处理，待整体激活」，ready+inactive 为「已退役」）；时间使用本地时区绝对时间；
+  存在非终态 upload 文档时每 2 秒查询其 status，全部终态或卸载后停止且不创建重复 timer。
+- 详情 / 预览 / 删除：`GET /api/documents/{id}`、`GET /api/documents/{id}/preview`、
+  `DELETE /api/documents/{id}`；预览抽屉 520px，PDF 显示页码 / 章节、DOCX 显示标题路径、
+  XLSX 显示工作表与行范围；SHA-256 只取详情返回值并只显示前 12 位；预览不执行 HTML / 宏 / 脚本 / 链接；
+  demo 与 upload 删除文案不同，确认按钮明确为「删除文档」；`documents` 能力非 ready 或后端不可达时
+  上传 / seed / 预览 / 删除全部禁用并解释原因；服务端错误展示真实 `request_id`，网络错误明确说明未获得。
+
+### 真实产品 Bug（本轮发现并修复）
+
+**BUG-8A-01｜图标侧栏下主导航链接没有任何可访问名称**
+
+- 发现方式：真实浏览器在 1024×768 视口渲染 `/knowledge`，
+  `backend` 正常；`.ep-nav__link` 的 `aria-label` 为 `null`，
+  `.ep-nav__label` 计算样式为 `display: none` 且 `innerText` 为 `""` ⇒ 链接的可访问名称为空。
+- 错误假设：以为「图标 + 文字」结构中，只要 CSS 隐藏文字仍会保留可访问名称。
+  实际 `display: none` 会把文本节点移出可访问性树。
+- 根因：`frontend/src/components/common/AppNav.vue:15-22` 的 `<RouterLink>` 只有图标与
+  `.ep-nav__label`，而 `frontend/src/layouts/AppLayout.vue:297`（`@media (max-width: 1199px)`）
+  将 `:deep(.ep-nav__label)` 设为 `display: none`，使 768–1199px 图标侧栏下链接失去唯一文本。
+- 修复前证据：新增最小失败测试
+  `frontend/src/layouts/AppLayout.spec.ts` ›
+  「gives every navigation link an accessible name independent of the responsive CSS」
+  → `expected [ undefined, undefined, undefined ] to deeply equal [ '知识库管理', 'RAG 问答', '学业规划' ]`，
+  `Tests 1 failed | 7 passed (8)`，容器内 `PRE_FIX_EXIT=1`；浏览器实测 `ariaLabel: null`、`visibleText: ""`。
+- 最小修复：`AppNav.vue` 的 `<RouterLink>` 增加 `:aria-label="item.label"`（一个属性，未改结构 / 样式 / 路由）。
+- 修复后证据：同一测试通过，全量前端 `88 passed`（`TEST_EXIT=0`）；
+  浏览器在 390×844 / 1024×768 / 1440×900 三档均读到
+  `navLabels = ["知识库管理","RAG 问答","学业规划"]` 且 `aria-current="page"` 恰好 1 个。
+
+### 验收
+
+- `docker compose exec frontend pnpm test` → **13 files / 88 passed，退出码 0**；
+  `pnpm build`（`vue-tsc --noEmit` + `vite build`）→ 成功，退出码 0；
+  `docker compose exec backend pytest -q` → **全部通过，退出码 0**（前端改动未触及后端契约）；
+  `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示，无空白错误）。
+- 真实浏览器只读 smoke（未自动 seed / 上传 / 删除任何真实数据）：
+  `/knowledge` 打开正常，统计卡显示真实数据（全部文档 15 / 可检索 0 / 处理中 15 / 失败 0），
+  演示数据状态为「空知识库」（`available_documents=15`、`ready=0`、`loaded=false`），
+  文档行显示「已处理，待整体激活」与本地时区绝对时间；
+  首次并发请求确认为 `health` / `documents` / `demo/status`，并按 `last_job_id` 恢复一次后立即停止轮询。
+- 三档视口（同源 iframe 实测，宽度 390 / 1024 / 1440）：
+  `documentElement.scrollWidth === clientWidth`（375/1009/1425），**无整页横向溢出**；
+  表格在窄屏下由 Element Plus 内部滚动容器提供**局部横向滚动**
+  （`scrollWidth=1140 → clientWidth=293`，滚动后「操作」列可进入视口）。
+- 键盘：`.ep-skip-link` 为第一个可聚焦元素；所有可见控件 `aria-label` 覆盖为 0 个缺失；
+  通过键盘打开预览抽屉后 `Escape` 关闭，焦点返回触发按钮；
+  打开删除确认后 `Escape` 关闭，**未产生任何 DELETE 请求**，文档仍为 15 行；
+  确认框标题「确认删除该文档？」、demo 文案「仅移除运行时索引，可通过加载演示资料恢复」、
+  按钮「取消 / 删除文档」。
+- 后端断线：`docker compose stop backend` 后刷新 `/knowledge`，
+  顶部固定错误条（「后端服务不可连接…重新检测」）、上传禁用、写操作说明、
+  文档区错误「错误码：NETWORK_ERROR / 未获得服务端请求编号」、侧栏「知识库概况暂不可用」，
+  页面不崩溃且控制台无未处理 JS 错误（仅浏览器原生网络失败日志）；`start backend` 后恢复
+  `Up (healthy)`、`documents=ready`、`planning=ready`，页面回到正常状态。
+- 范围外（未做）：Chat SSE、学业规划选择器 / 导入 / 结果、API Key 输入框、
+  依赖升级、demo 语料与 ground truth 修改、后端契约修改。
 
 ## 阶段 8 前置独立修复轮（BUG-8-PRE-01：空知识库启动死锁）
 

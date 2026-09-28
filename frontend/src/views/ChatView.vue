@@ -13,14 +13,14 @@ import PageHeader from '@/components/common/PageHeader.vue'
         type="info"
         :closable="false"
         show-icon
-        title="功能将在后续阶段实现"
-        description="流式回答、引用抽屉与拒答状态将在阶段 6 与阶段 8 实现。本阶段不显示任何回答或来源。"
+        title="问答能力尚未接入"
+        description="流式回答、引用抽屉与拒答状态尚未实现；是否可用以健康接口返回的 chat 能力为准，本页不生成任何回答或来源。"
       />
 
       <div class="ep-placeholder">
         <ElIcon :size="24"><ChatDotRound /></ElIcon>
-        <p class="ep-placeholder__title">问答能力尚未接入</p>
-        <p>当前健康接口如实返回 chat = unconfigured，因此此处不提供输入区，也不生成任何回答。</p>
+        <p class="ep-placeholder__title">暂未提供输入区</p>
+        <p>在问答能力接入前，这里不展示任何回答、来源或检索范围选项。</p>
       </div>
     </div>
   </section>

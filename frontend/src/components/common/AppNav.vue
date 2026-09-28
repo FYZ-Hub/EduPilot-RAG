@@ -17,6 +17,7 @@ const items = [
       :key="item.name"
       class="ep-nav__link"
       :to="{ name: item.name }"
+      :aria-label="item.label"
     >
       <ElIcon :size="18"><component :is="item.icon" /></ElIcon>
       <span class="ep-nav__label">{{ item.label }}</span>
