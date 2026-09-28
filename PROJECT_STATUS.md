@@ -22,6 +22,52 @@
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
 
+## 阶段 8 E2E 前置独立修复轮（BUG-8-E2E-02：Chroma 组合过滤导致问答流中断）
+
+### 真实证据链
+
+- E2E 场景 5 trace 中的真实请求过滤条件：`semester=2025-2026-2` + `doc_category=degree_plan`。
+- 隔离库 `.tmp/e2e/20260928-202152/data/sqlite/app.db` 只读核对：该组合命中 **0 个 chunk**；`degree_plan` 合计 **31 个 chunk**，其 citation.`semester` **全部为 null**。按 SQLite 权威规则应得 `outcome=refused` / `reason_code=no_evidence` / `citation_count=0`。
+- 实际服务端 SSE 返回：`event: error` → `code=MODEL_STREAM_INTERRUPTED`、`retryable=true`。
+
+### 根因
+
+- 文件/函数：`backend/app/search/dense.py` → `chroma_where()`。
+- 多个过滤字段被**平铺到同一个 where 顶层**（`{"semester": …, "doc_category": …}`），Chroma 要求顶层只能有一个算子，于是抛
+  `ValueError: Expected where to have exactly one operator, got {'semester': '2025-2026-2', 'doc_category': 'degree_plan'}`（`chromadb/api/types.py:604`）。
+- 该异常被 Chat 流的通用异常边界收敛成 `MODEL_STREAM_INTERRUPTED`，掩盖了真实原因。
+
+### 修复
+
+- 无条件 → 返回 `None`；单条件 → 返回一个合法的一层表达式；多条件 → **单一顶层 `$and`**。
+- 字段顺序稳定：`major` → `grade_year` → `semester` → `doc_category`；每个字段使用精确相等 `$eq`。
+- 不删条件、不放宽为 OR；Chroma 仍只做预筛，SQLite `hydrate` 继续作为最终权威校验。
+- 未修改 Chat 异常边界，未吞掉检索异常。
+
+### 验证
+
+| 项目 | 命令 | 结果 |
+|---|---|---|
+| 修复前定向测试 | `pytest tests/test_dense_filters.py -q -p no:logging` | **2 failed**，退出码 **1**，原始错误含上述 `ValueError: Expected where to have exactly one operator` |
+| 修复后定向测试（8 项） | 同上 | **8 passed**，退出码 **0** |
+| 相关后端回归 | `pytest tests/test_dense_filters.py tests/test_retrieval_hybrid.py tests/test_reranking_pipeline.py tests/test_chat_flow.py tests/test_chat_resilience.py tests/test_llm_provider.py -q -p no:logging` | 退出码 **0** |
+| 后端全量回归 | `pytest -q` | 退出码 **0**，耗时 **553 秒**，1 个 warning（starlette `DeprecationWarning: the anyio.abc.BlockingPortal alias is deprecated`） |
+| 工作区/容器文件哈希 | SHA-256 | `dense.py = 71ac0d31…3ce12e`、`test_dense_filters.py = 230d5743…615c6b`，与容器内实现一致 |
+
+新增测试文件 `backend/tests/test_dense_filters.py` 共 8 项：`test_chroma_where_returns_none_without_filters`、`test_chroma_where_keeps_a_single_filter_valid`、`test_chroma_where_wraps_multiple_filters_in_and`、`test_chroma_where_supports_all_filter_fields`、`test_chroma_where_is_accepted_by_chroma_validator`、`test_combined_retrieval_filters_return_empty_instead_of_crashing`、`test_combined_filters_never_drop_a_field`、`test_chat_combined_empty_filters_refuse_with_no_evidence`。
+
+### 前端
+
+- 沿用本轮之前已真实完成的 runner：`frontend pnpm test` = **38 files / 449 passed**，退出码 0；`frontend pnpm build` 成功，退出码 0。
+- `git diff -- frontend/src` 为空，本轮未改动任何前端生产源码。
+
+### 状态
+
+- **阶段 8 仍为 `in_progress`**；本缺陷已修复并完成后端回归，但 Playwright 端到端验收尚未通过。
+- Playwright 当前真实进度：**4 passed / 1 failed / 3 未运行**（最近一次 run id `20260928-202152`；场景 5 的失败根因即本缺陷）。
+- 下一步：使用国内 Playwright 镜像重建 E2E frontend 镜像，重新执行完整 8 场景，验证场景 5 由 `MODEL_STREAM_INTERRUPTED` 变为 `refused` / `no_evidence`。
+- **不得**把 Playwright 验收或阶段 8 标记为 completed。
+
 ## 阶段 8A 结论（Vue 应用框架完善 + 知识库管理页面）
 
 阶段 8 = `in_progress`，8A = `completed`，下一步为 **8B RAG 问答页面**。

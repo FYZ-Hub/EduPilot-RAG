@@ -28,17 +28,30 @@ DENSE_OVERSAMPLE = 4
 
 
 def chroma_where(filters: RetrievalFilters) -> dict[str, Any] | None:
-    """把允许的过滤条件翻译为 Chroma 标量过滤（仅作为预筛，最终以 SQLite 为准）。"""
-    conditions: dict[str, Any] = {}
+    """把允许的过滤条件翻译为 Chroma 标量过滤（仅作为预筛，最终以 SQLite 为准）。
+
+    - 没有任何条件时返回 ``None``；
+    - 只有一个条件时返回 Chroma 接受的一层表达式；
+    - **多个条件必须包装成单层 ``$and``**：Chroma 要求 where 的顶层只能有一个算子，
+      平铺多个键会抛 ``ValueError: Expected where to have exactly one operator``；
+    - 条件顺序稳定：major → grade_year → semester → doc_category；
+    - 每个条件都是精确相等（``$eq``），不使用 OR、不忽略任何字段；
+    - Chroma 只做预筛，SQLite ``hydrate`` 仍是最终权威校验。
+    """
+    conditions: list[dict[str, Any]] = []
     if filters.major is not None:
-        conditions["major"] = filters.major
+        conditions.append({"major": {"$eq": filters.major}})
     if filters.grade_year is not None:
-        conditions["grade_year"] = filters.grade_year
+        conditions.append({"grade_year": {"$eq": filters.grade_year}})
     if filters.semester is not None:
-        conditions["semester"] = filters.semester
+        conditions.append({"semester": {"$eq": filters.semester}})
     if filters.doc_category is not None:
-        conditions["doc_category"] = filters.doc_category
-    return conditions or None
+        conditions.append({"doc_category": {"$eq": filters.doc_category}})
+    if not conditions:
+        return None
+    if len(conditions) == 1:
+        return conditions[0]
+    return {"$and": conditions}
 
 
 class DenseRetriever:
