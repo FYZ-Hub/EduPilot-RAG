@@ -139,6 +139,90 @@ partial / success；图标按钮与表单控件具备可见 label 与 `aria-labe
 - 范围外（未做）：Chat SSE、学业规划选择器 / 导入 / 结果、API Key 输入框、
   依赖升级、demo 语料与 ground truth 修改、后端契约修改。
 
+## 阶段 8A 独立回归修复轮（BUG-8A-02 / BUG-8A-03）
+
+阶段 8 仍为 `in_progress`，8A 在本轮修复后仍为 `completed`；**未开始 8B RAG 问答页面**。
+本轮只修复 8A 交付中「API 错误被静默吞掉 / 缺少错误码与请求编号」两个缺陷，
+未修改后端业务、未配置真实 LLM、未修改任何 `.env`、未调用真实外部 API、
+未执行真实 seed / 上传 / 删除，未修改 `PRODUCT_SPEC.md` 或 `UI_SPEC.md`。
+
+### BUG-8A-02｜演示资料 seed 失败被静默吞掉
+
+- 现象：`POST /api/demo/seed` 失败后页面没有任何提示，用户无法得知失败原因，
+  也无法重试；`demo.seedError` 已在 store 中保存却从未被渲染。
+- 根因：
+  1. `frontend/src/views/KnowledgeView.vue:124` 的 `onSeed()` 只处理 `demo.seed()` 的
+     `true` 分支（`ElMessage.info`），对 `false` 不做任何展示；`demo.seed()` 在
+     `frontend/src/stores/demo.ts:182-184` 把异常保存到 `seedError` 后返回 `false`。
+  2. 模板中完全没有绑定 `demo.seedError`（演示资料卡片内只有 `demo.statusError` 的
+     `AsyncState` 错误分支）。
+- 修复前真实失败证据：新增 3 项组件测试后执行
+  `docker compose exec frontend pnpm vitest run src/components/documents/FileUploader.spec.ts src/views/KnowledgeView.spec.ts`
+  → `PRE_FIX_EXIT=1`、`Test Files 2 failed (2)`、`Tests 6 failed | 14 passed (20)`。
+  其中 seed 相关 3 项原始输出：
+  - `expected '演示资料空知识库知识库为空，可加载演示资料或上传自有文档。…' to contain '演示数据集清单不可用'`
+  - `expected '演示资料空知识库知识库为空，可加载演示资料或上传自有文档。…' to contain '无法连接后端服务'`
+  - `expected '演示资料空知识库知识库为空，可加载演示资料或上传自有文档。…' to contain 'DEMO_PIPELINE_UNAVAILABLE'`
+- 最小修复（复用现有 `ErrorAlert.vue`，未复制第二套错误展示逻辑）：
+  - `frontend/src/views/KnowledgeView.vue:24` 引入 `ErrorAlert`；
+  - `frontend/src/views/KnowledgeView.vue:372-381` 在**演示资料卡片内**渲染
+    `demo.seedError`（标题「演示资料加载失败」自动显示服务端 `message`、机器错误码与
+    `requestIdLabel`），并提供「重试加载」按钮（`:loading="demo.seeding"` 防止重复提交）；
+  - 重试仍只调用现有 `POST /api/demo/seed`（`onSeed()`），未新增 resume / reset / cancel 接口；
+  - `frontend/src/views/KnowledgeView.vue:684` 只新增一处间距样式。
+
+### BUG-8A-03｜逐文件上传错误缺少错误码和 request_id
+
+- 现象：上传队列项失败时只显示 `item.message`，服务端机器错误码与真实 `request_id`
+  完全不可见，用户与维护者都无法定位。
+- 根因：
+  1. `frontend/src/components/documents/FileUploader.vue:175-182` 已把 `ApiError`
+     保存到 `item.error`；
+  2. 但模板 `frontend/src/components/documents/FileUploader.vue:283`（修复前）
+     只渲染 `item.message`，`item.error` 从未被渲染。
+- 修复前真实失败证据（同一次运行）：
+  - `expected 'plan.pdfPDF · 1KB失败解析失败 重试  移除' to contain 'DOCUMENT_PARSE_FAILED'`
+  - `expected 'plan.pdfPDF · 1KB失败该文件当前不允许重试，请修正或更换文…' to contain 'DOCUMENT_RETRY_NOT_ALLOWED'`
+  - `expected 'plan.pdfPDF · 1KB失败无法连接后端服务（网络错误或跨域被阻…' to contain 'NETWORK_ERROR'`
+- 最小修复（单一错误元信息实现，未复制逻辑）：
+  - 新增 `frontend/src/domain/apiError.ts`：`apiErrorCodeLabel()`（服务端 `code` 优先，
+    网络 → `NETWORK_ERROR`，取消 → `REQUEST_ABORTED`，兜底 `HTTP_{status}`）与
+    `apiErrorRequestIdLabel()`（服务端错误显示真实 request ID，网络 / 取消 / CORS 阻断
+    明确显示「未获得服务端请求编号」）；
+  - `frontend/src/components/common/ErrorAlert.vue:23` 改为复用同一处
+    `apiErrorCodeLabel()`（移除组件内重复实现，行为不变）；
+  - `frontend/src/components/documents/FileUploader.vue:24` 引入派生函数；
+    `:284-286` 在失败队列项内追加紧凑元信息「错误码：<code>」与请求编号标签；
+    `:417` 只新增一处样式；
+  - 纯客户端扩展名 / 大小预检失败时 `item.error` 仍为 `null`，因此**不渲染**错误码与
+    请求编号，不冒充服务端错误；
+  - 保留既有语义：`DOCUMENT_RETRY_NOT_ALLOWED` 的用户指引与禁用重试、部分成功保留对话框、
+    逐项重试、全部成功才关闭；所有错误内容均为 Vue 文本插值，无 `v-html`，
+    不显示堆栈 / 请求体 / 文件正文 / 绝对路径 / API Key。
+
+### 修复后验收
+
+- 定向：`docker compose exec frontend pnpm vitest run src/components/documents/FileUploader.spec.ts src/views/KnowledgeView.spec.ts`
+  → `POST_FIX_EXIT=0`、`Test Files 2 passed (2)`、`Tests 20 passed (20)`。
+- 前端全量：`docker compose exec frontend pnpm test` → **13 files / 95 passed**，退出码 0
+  （上一轮 88，净 +7）。
+- 前端构建：`docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- 后端全量：`docker compose exec backend pytest -q` → **675 tests（42 文件）全部通过**，退出码 0
+  （仅前端改动，后端契约未变）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `git diff --check` 退出码 0（仅 LF/CRLF 提示）。
+- `GET /api/health` 仍如实为 `status=degraded`、`documents=ready`、`chat=unconfigured`、
+  `planning=ready`、`embedding/reranker/llm.ready=false`，**未为了测试改成虚假 ready**。
+- 真实浏览器只读复核（未执行任何 seed / 上传 / 删除）：
+  - `/knowledge` 正常渲染 15 行真实文档、统计卡 `全部文档15 / 可检索0 / 处理中15 / 失败0`；
+  - 上传对话框中选择不支持的扩展名（`PROJECT_STATUS.md`）→ 队列项只显示
+    「不支持的文件类型：仅允许 PDF / DOCX / XLSX」，**不含**「错误码：」与「请求编号」，
+    「开始上传」禁用，且网络面板**没有任何发往 `/api` 的 POST**。
+
+### 下一步
+
+8A 修复完成后，下一步才是 **8B RAG 问答页面**（实施前必须读取 `docs/UI_SPEC.md` 第 6 节）。
+
 ## 阶段 8 前置独立修复轮（BUG-8-PRE-01：空知识库启动死锁）
 
 阶段 7 仍为 `completed`，阶段 8 仍为 `not_started`；本轮只修复健康能力的启动死锁，

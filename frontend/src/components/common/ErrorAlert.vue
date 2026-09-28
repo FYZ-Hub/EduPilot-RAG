@@ -9,6 +9,7 @@
 import { computed } from 'vue'
 
 import { toApiError, type ApiError } from '@/api/client'
+import { apiErrorCodeLabel } from '@/domain/apiError'
 
 const props = withDefaults(
   defineProps<{
@@ -20,22 +21,7 @@ const props = withDefaults(
 
 const apiError = computed(() => (props.error ? toApiError(props.error) : null))
 
-const codeText = computed(() => {
-  const current = apiError.value
-  if (!current) {
-    return null
-  }
-  if (current.code) {
-    return current.code
-  }
-  if (current.kind === 'network') {
-    return 'NETWORK_ERROR'
-  }
-  if (current.kind === 'aborted') {
-    return 'REQUEST_ABORTED'
-  }
-  return current.status ? `HTTP_${current.status}` : null
-})
+const codeText = computed(() => apiErrorCodeLabel(apiError.value))
 </script>
 
 <template>

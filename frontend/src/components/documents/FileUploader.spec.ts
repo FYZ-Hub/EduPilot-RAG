@@ -185,4 +185,73 @@ describe('FileUploader', () => {
     expect(start!.attributes('disabled')).toBeDefined()
     expect(mocks.uploadDocument).not.toHaveBeenCalled()
   })
+
+  it('shows the server message, machine code and real request id for a failed item', async () => {
+    mocks.uploadDocument.mockRejectedValue(
+      new ApiError('解析失败', {
+        kind: 'http',
+        status: 500,
+        code: 'DOCUMENT_PARSE_FAILED',
+        requestId: 'req-upload-1',
+      }),
+    )
+    const wrapper = await mountUploader()
+
+    await addFiles(wrapper, [new File(['a'], 'plan.pdf')])
+    await clickStart(wrapper)
+
+    const text = queueText(wrapper)
+    expect(text).toContain('解析失败')
+    expect(text).toContain('DOCUMENT_PARSE_FAILED')
+    expect(text).toContain('请求编号：req-upload-1')
+  })
+
+  it('keeps the retry guidance while showing the code and request id for DOCUMENT_RETRY_NOT_ALLOWED', async () => {
+    mocks.uploadDocument.mockRejectedValue(
+      new ApiError('不允许重试', {
+        kind: 'http',
+        status: 409,
+        code: 'DOCUMENT_RETRY_NOT_ALLOWED',
+        requestId: 'req-1',
+      }),
+    )
+    const wrapper = await mountUploader()
+
+    await addFiles(wrapper, [new File(['a'], 'plan.pdf')])
+    await clickStart(wrapper)
+
+    const text = queueText(wrapper)
+    expect(text).toContain('请修正或更换文件')
+    expect(text).toContain('DOCUMENT_RETRY_NOT_ALLOWED')
+    expect(text).toContain('请求编号：req-1')
+    expect(buttonByText(wrapper, '重试')!.attributes('disabled')).toBeDefined()
+  })
+
+  it('reports a network failure without fabricating a request id', async () => {
+    mocks.uploadDocument.mockRejectedValue(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const wrapper = await mountUploader()
+
+    await addFiles(wrapper, [new File(['a'], 'plan.pdf')])
+    await clickStart(wrapper)
+
+    const text = queueText(wrapper)
+    expect(text).toContain('无法连接后端服务')
+    expect(text).toContain('NETWORK_ERROR')
+    expect(text).toContain('未获得服务端请求编号')
+    expect(text).not.toContain('请求编号：')
+  })
+
+  it('keeps client-side precheck failures local instead of faking a server error', async () => {
+    const wrapper = await mountUploader()
+
+    await addFiles(wrapper, [new File(['a'], 'notes.txt')])
+
+    const text = queueText(wrapper)
+    expect(text).toContain('不支持的文件类型')
+    expect(text).not.toContain('错误码：')
+    expect(text).not.toContain('请求编号')
+    expect(mocks.uploadDocument).not.toHaveBeenCalled()
+  })
 })

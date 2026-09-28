@@ -3,6 +3,7 @@ import { flushPromises, mount, type VueWrapper } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 import { createPinia } from 'pinia'
 
+import { ApiError } from '@/api/client'
 import type { DocumentListPayload } from '@/api/documents'
 import type { DemoStatus } from '@/api/demo'
 import type { HealthResponse } from '@/api/health'
@@ -221,6 +222,105 @@ describe('KnowledgeView', () => {
     await flushPromises()
 
     expect(mocks.listDocuments).toHaveBeenCalledTimes(2)
+    wrapper.unmount()
+  })
+
+  it('shows the seed failure next to the demo section with its code and request id', async () => {
+    mocks.fetchHealth.mockResolvedValue(health('ready'))
+    mocks.seedDemo.mockRejectedValue(
+      new ApiError('演示数据集清单不可用', {
+        kind: 'http',
+        status: 503,
+        code: 'DEMO_PIPELINE_UNAVAILABLE',
+        requestId: 'req-seed-1',
+      }),
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    await buttonByText(wrapper, '加载演示资料')!.trigger('click')
+    await flushPromises()
+
+    const demoCard = wrapper.find('.ep-demo')
+    expect(demoCard.text()).toContain('演示数据集清单不可用')
+    expect(demoCard.text()).toContain('DEMO_PIPELINE_UNAVAILABLE')
+    expect(demoCard.text()).toContain('请求编号：req-seed-1')
+    expect(buttonByText(wrapper, '重试加载')).toBeTruthy()
+    expect(mocks.seedDemo).toHaveBeenCalledTimes(1)
+    wrapper.unmount()
+  })
+
+  it('reports a network seed failure as unnumbered instead of fabricating a request id', async () => {
+    mocks.fetchHealth.mockResolvedValue(health('ready'))
+    mocks.seedDemo.mockRejectedValue(
+      new ApiError('无法连接后端服务（网络错误或跨域被阻断）', { kind: 'network' }),
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    await buttonByText(wrapper, '加载演示资料')!.trigger('click')
+    await flushPromises()
+
+    const text = wrapper.find('.ep-demo').text()
+    expect(text).toContain('无法连接后端服务')
+    expect(text).toContain('NETWORK_ERROR')
+    expect(text).toContain('未获得服务端请求编号')
+    expect(text).not.toContain('请求编号：')
+    wrapper.unmount()
+  })
+
+  it('clears the previous seed error when the retry is accepted', async () => {
+    mocks.fetchHealth.mockResolvedValue(health('ready'))
+    mocks.seedDemo.mockRejectedValueOnce(
+      new ApiError('演示数据集清单不可用', {
+        kind: 'http',
+        status: 503,
+        code: 'DEMO_PIPELINE_UNAVAILABLE',
+        requestId: 'req-seed-1',
+      }),
+    )
+    const wrapper = mountView()
+    await flushPromises()
+
+    await buttonByText(wrapper, '加载演示资料')!.trigger('click')
+    await flushPromises()
+    expect(wrapper.find('.ep-demo').text()).toContain('DEMO_PIPELINE_UNAVAILABLE')
+
+    mocks.seedDemo.mockResolvedValueOnce({
+      job_id: 'job-2',
+      dataset_version: '2026.1',
+      target_stage: 'completed',
+      status: 'queued',
+      status_url: '/api/demo/jobs/job-2',
+      poll_after_seconds: 2,
+      reused_active_job: false,
+    })
+    mocks.fetchDemoJob.mockResolvedValue({
+      job_id: 'job-2',
+      dataset_version: '2026.1',
+      target_stage: 'completed',
+      status: 'running',
+      current_stage: 'parsing',
+      total: 1,
+      imported: 0,
+      resumed: 0,
+      skipped: 0,
+      failed: 0,
+      processed: 0,
+      progress_percent: 0,
+      poll_after_seconds: 2,
+      created_at: null,
+      started_at: null,
+      finished_at: null,
+      documents: [],
+      errors: [],
+    })
+
+    await buttonByText(wrapper, '重试加载')!.trigger('click')
+    await flushPromises()
+
+    expect(mocks.seedDemo).toHaveBeenCalledTimes(2)
+    expect(wrapper.find('.ep-demo').text()).not.toContain('DEMO_PIPELINE_UNAVAILABLE')
     wrapper.unmount()
   })
 })

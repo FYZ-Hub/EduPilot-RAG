@@ -21,6 +21,7 @@ import {
   type UploadDisposition,
 } from '@/api/documents'
 import { fileTypeLabel } from '@/domain/documents'
+import { apiErrorCodeLabel, apiErrorRequestIdLabel } from '@/domain/apiError'
 
 const props = withDefaults(
   defineProps<{
@@ -280,6 +281,10 @@ async function retryItem(item: QueueItem): Promise<void> {
               }}
             </ElTag>
             <span v-if="item.message" class="ep-uploader__item-message">{{ item.message }}</span>
+            <span v-if="item.error" class="ep-uploader__item-error">
+              <span v-if="apiErrorCodeLabel(item.error)">错误码：{{ apiErrorCodeLabel(item.error) }}</span>
+              <span>{{ apiErrorRequestIdLabel(item.error) }}</span>
+            </span>
             <ElButton
               v-if="item.status === 'error'"
               size="small"
@@ -402,6 +407,17 @@ async function retryItem(item: QueueItem): Promise<void> {
 
 .ep-uploader__item-meta,
 .ep-uploader__item-message {
+  font-size: 12px;
+  line-height: 18px;
+  color: var(--ep-color-text-muted);
+  overflow-wrap: anywhere;
+}
+
+/* 失败项的错误码与请求编号：紧凑的元信息，不占用额外弹层 */
+.ep-uploader__item-error {
+  display: inline-flex;
+  flex-direction: column;
+  align-items: flex-end;
   font-size: 12px;
   line-height: 18px;
   color: var(--ep-color-text-muted);

@@ -21,6 +21,7 @@ import {
 import { isJobTerminal } from '@/api/demo'
 import AsyncState from '@/components/common/AsyncState.vue'
 import ConfirmDeleteDialog from '@/components/common/ConfirmDeleteDialog.vue'
+import ErrorAlert from '@/components/common/ErrorAlert.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import StatusTag from '@/components/common/StatusTag.vue'
 import DocumentPreviewDrawer from '@/components/documents/DocumentPreviewDrawer.vue'
@@ -368,6 +369,17 @@ onBeforeUnmount(() => {
         </ElTag>
       </div>
 
+      <ErrorAlert
+        v-if="demo.seedError"
+        class="ep-demo__seed-error"
+        :error="demo.seedError"
+        title="演示资料加载失败"
+      >
+        <ElButton size="small" :loading="demo.seeding" :disabled="seedDisabled" @click="onSeed">
+          重试加载
+        </ElButton>
+      </ErrorAlert>
+
       <AsyncState
         :error="demo.statusError"
         :empty="!demo.status"
@@ -667,6 +679,10 @@ onBeforeUnmount(() => {
 
 .ep-demo__notice {
   margin-top: var(--ep-space-3);
+}
+
+.ep-demo__seed-error {
+  margin-bottom: var(--ep-space-4);
 }
 
 .ep-notice__text {
