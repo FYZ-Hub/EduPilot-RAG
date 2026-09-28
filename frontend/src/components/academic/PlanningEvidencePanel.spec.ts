@@ -1,5 +1,5 @@
-import { describe, expect, it } from 'vitest'
-import { mount } from '@vue/test-utils'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { flushPromises, mount } from '@vue/test-utils'
 import ElementPlus from 'element-plus'
 
 import type { PlanningEvidence } from '@/api/academic'
@@ -110,5 +110,51 @@ describe('PlanningEvidencePanel', () => {
 
     expect(wrapper.text()).toContain('本次计算没有可展示的证据')
     expect(wrapper.find('.ep-evidence-card').exists()).toBe(false)
+  })
+})
+
+describe('PlanningEvidencePanel focus scrolling', () => {
+  let scrollIntoView: ReturnType<typeof vi.fn>
+
+  beforeEach(() => {
+    scrollIntoView = vi.fn()
+    Object.defineProperty(Element.prototype, 'scrollIntoView', {
+      value: scrollIntoView,
+      configurable: true,
+      writable: true,
+    })
+  })
+
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+
+  it('scrolls when the focused id is already set before mount', async () => {
+    mountPanel({ evidence: [evidence()], focusedChunkId: 'c-1' })
+    await flushPromises()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+    expect(scrollIntoView).toHaveBeenCalledWith({ block: 'nearest' })
+  })
+
+  it('scrolls again when the focused chunk changes later', async () => {
+    const wrapper = mountPanel({
+      evidence: [evidence(), evidence({ chunk_id: 'c-2' })],
+      focusedChunkId: null,
+    })
+    await flushPromises()
+    expect(scrollIntoView).not.toHaveBeenCalled()
+
+    await wrapper.setProps({ focusedChunkId: 'c-2' })
+    await flushPromises()
+
+    expect(scrollIntoView).toHaveBeenCalledTimes(1)
+  })
+
+  it('never scrolls without a focused chunk id', async () => {
+    mountPanel({ evidence: [evidence()], focusedChunkId: null })
+    await flushPromises()
+
+    expect(scrollIntoView).not.toHaveBeenCalled()
   })
 })

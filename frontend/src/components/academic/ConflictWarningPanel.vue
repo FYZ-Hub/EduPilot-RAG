@@ -174,9 +174,13 @@ function linked(warning: ConflictWarning): PlanningEvidence[] {
   margin: 0;
 }
 
+/* UI_SPEC 9：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
 .ep-evidence-chip {
-  min-height: 28px;
-  padding: 0 var(--ep-space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 var(--ep-space-3);
   border: 1px solid var(--ep-color-evidence);
   border-radius: 999px;
   background: var(--ep-color-evidence-soft);
@@ -189,5 +193,11 @@ function linked(warning: ConflictWarning): PlanningEvidence[] {
 .ep-evidence-chip:focus-visible {
   outline: 2px solid var(--ep-color-evidence);
   outline-offset: 2px;
+}
+
+@media (max-width: 767px) {
+  .ep-evidence-chip {
+    min-height: 44px;
+  }
 }
 </style>

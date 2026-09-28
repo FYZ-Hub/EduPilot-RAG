@@ -36,19 +36,28 @@ const inputRef = ref<HTMLInputElement | null>(null)
 const acceptAttribute = computed(() => props.accept.map((item) => `.${item}`).join(','))
 
 function pick(): void {
+  if (props.disabled) {
+    return
+  }
   inputRef.value?.click()
 }
 
 function onSelect(event: Event): void {
   const target = event.target as HTMLInputElement
-  if (target.files && target.files.length > 0) {
-    emit('files', Array.from(target.files))
-  }
+  const files = target.files ? Array.from(target.files) : []
   // 允许重复选择同一个文件
   target.value = ''
+  if (props.disabled || files.length === 0) {
+    return
+  }
+  emit('files', files)
 }
 
 function onDrop(event: DragEvent): void {
+  if (props.disabled) {
+    // 禁用时拖放同样不得交回任何文件
+    return
+  }
   const files = event.dataTransfer?.files
   if (files && files.length > 0) {
     emit('files', Array.from(files))

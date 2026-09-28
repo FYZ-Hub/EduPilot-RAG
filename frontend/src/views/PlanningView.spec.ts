@@ -569,3 +569,75 @@ describe('PlanningView evidence and lifecycle', () => {
     expect(cancelSpy).toHaveBeenCalled()
   })
 })
+
+describe('PlanningView url synchronisation', () => {
+  it('removes a duplicated array query id while keeping unrelated fields', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+
+    const { wrapper, router } = await mountView({
+      record_set_id: ['rs-1', 'rs-2'],
+      tab: 'x',
+    })
+
+    expect(wrapper.find('.ep-planning__stale-notice').exists()).toBe(true)
+    expect(router.currentRoute.value.query.record_set_id).toBeUndefined()
+    expect(router.currentRoute.value.query.tab).toBe('x')
+    // 绝不因为数组里存在真实 ID 就自动选中第一个
+    expect((wrapper.find('.ep-selection__record').element as HTMLSelectElement).value).toBe('')
+  })
+
+  it('removes an empty string query id without touching the valid one', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+
+    const { router } = await mountView({ record_set_id: '', rule_set_id: 'ru-1' })
+
+    expect(router.currentRoute.value.query.record_set_id).toBeUndefined()
+    expect(router.currentRoute.value.query.rule_set_id).toBe('ru-1')
+  })
+
+  it('restores a valid query pushed after mount without reloading options', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const { wrapper, router } = await mountView()
+
+    await router.push({ query: { record_set_id: 'rs-2', rule_set_id: 'ru-1' } })
+    await flushPromises()
+
+    expect((wrapper.find('.ep-selection__record').element as HTMLSelectElement).value).toBe('rs-2')
+    expect((wrapper.find('.ep-selection__rule').element as HTMLSelectElement).value).toBe('ru-1')
+    expect(mocks.fetchAcademicOptions).toHaveBeenCalledTimes(1)
+  })
+
+  it('follows history navigation back to the previous selection without reloading options', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const { wrapper, router } = await mountView()
+    await selectBoth(wrapper, 'rs-1', 'ru-1')
+    const calls = mocks.fetchAcademicOptions.mock.calls.length
+
+    await router.push({ query: { record_set_id: 'rs-2', rule_set_id: 'ru-1' } })
+    await flushPromises()
+    expect((wrapper.find('.ep-selection__record').element as HTMLSelectElement).value).toBe('rs-2')
+
+    router.back()
+    await flushPromises()
+    await flushPromises()
+
+    expect((wrapper.find('.ep-selection__record').element as HTMLSelectElement).value).toBe('rs-1')
+    expect(mocks.fetchAcademicOptions.mock.calls.length).toBe(calls)
+  })
+
+  it('clears an invalid array query pushed after mount and never loops', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const { wrapper, router } = await mountView()
+    await selectBoth(wrapper, 'rs-1', 'ru-1')
+    const calls = mocks.fetchAcademicOptions.mock.calls.length
+
+    await router.push({ query: { record_set_id: ['rs-1', 'rs-2'], rule_set_id: 'ru-1' } })
+    await flushPromises()
+    await flushPromises()
+
+    expect(wrapper.find('.ep-planning__stale-notice').exists()).toBe(true)
+    expect(router.currentRoute.value.query.record_set_id).toBeUndefined()
+    expect(router.currentRoute.value.query.rule_set_id).toBe('ru-1')
+    expect(mocks.fetchAcademicOptions.mock.calls.length).toBe(calls)
+  })
+})

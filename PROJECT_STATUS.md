@@ -454,6 +454,115 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 
 **8C — 学业规划页面**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）。
 
+## 阶段 8C-2 独立回归修复轮（BUG-8C2-01 ~ BUG-8C2-05）
+
+阶段 8 = `in_progress`；**8C-2 修复后仍为 `completed`**；阶段 8C 整体仍为 `completed`；
+**下一轮才是 Playwright 端到端收尾**（本轮未安装 Playwright，也未开始阶段 8 最终 E2E）。
+本轮只修复 5 个已确认缺陷；未修改后端、`PRODUCT_SPEC.md` / `UI_SPEC.md` / `.env`，
+未配置或调用真实 LLM，未下载模型，未访问外部 API，未真实 seed / 上传 / 删除，
+未真实导入 academic 文件、未真实调用 `POST /api/academic/plan`。
+
+### 修复前失败证据（先写测试，再修复）
+
+- 命令：`docker compose exec frontend pnpm vitest run src/tests/hit-target.spec.ts
+  src/components/common/FilePickField.spec.ts src/components/academic/PlanningEvidencePanel.spec.ts
+  src/views/PlanningView.spec.ts`
+- 关键输出：`Test Files 4 failed (4)`、`Tests 14 failed | 37 passed (51)`；失败分布
+  `hit-target 7 / FilePickField 1 / PlanningEvidencePanel 2 / PlanningView 4`，
+  典型断言：`expected '' to contain 'min-height: 40px'`、
+  `expected [ [ [ File{} ] ] ] to be undefined`（disabled 拖放仍然 emit）、
+  `expected "spy" to be called 1 times, but got 0 times`（未滚动）、
+  `expected 'rs-1,rs-2' to be undefined`（数组 query 未从 URL 删除）。
+- 退出码：**1**
+
+### BUG-8C2-01｜数组型 URL query 未从地址栏清除
+
+- 复现：打开 `/planning?record_set_id=rs-1&record_set_id=rs-2&tab=x`；页面提示「之前选择的数据已失效」，
+  但重复的 `record_set_id` 仍留在 URL。
+- 根因：[PlanningView.vue](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/views/PlanningView.vue#L135-L141)
+  原先的 `stringOf()` 把数组、空串、`null` 与「字段缺失」统一归一化成 `undefined`，
+  `sameSelectionQuery()` 因此误判「当前 URL 已是规范形式」并跳过 `router.replace`。
+- 修复：新增 `isCanonicalQueryValue()`（`undefined` 或**非空字符串**才算规范）与
+  `isCanonicalSelectionQuery()`，`syncQuery()` 仅在「当前 URL 两个字段都规范 且 与目标一致」时跳过回写；
+  非规范形式一律回写清理。数组中的真实 ID 不会被选中（仍由 Store 的纯函数决定）。
+
+### BUG-8C2-02｜页面挂载后忽略浏览器前进/后退产生的 query 变化
+
+- 根因：页面只在 `onMounted` 的 `bootstrap()` 中恢复一次选择，没有监听路由 query。
+- 修复：新增 route watcher（[PlanningView.vue L153-L163](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/views/PlanningView.vue#L153-L163)），
+  仅在 `record_set_id` / `rule_set_id` 变化时触发：
+  先由 `queryMatchesSelection()`（复用 domain 的 `readSelectionQuery`，不复制选择算法）
+  判断 URL 是否已与当前选择一致；一致则**直接返回**（无关 query 变化、本页回写都不再恢复，也不重复请求 options）；
+  否则调用现有 `academic.restoreSelection(route.query)`，成功后 `syncQuery()` 规范化 URL。
+  Store watcher 与 route watcher 通过 `queryMatchesSelection()` + `sameSelectionQuery()` 双向收敛，不会互相循环。
+
+### BUG-8C2-03｜窄屏证据抽屉首次打开只高亮、不滚动
+
+- 根因：[PlanningEvidencePanel.vue](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/components/academic/PlanningEvidencePanel.vue#L29-L42)
+  的 `watch(() => props.focusedChunkId, …)` 不是 `immediate`，且用 `document.getElementById`
+  查找卡片（组件未挂到 body 时找不到）。
+- 修复：改为组件内 `listRef` + `querySelectorAll('[data-chunk-id]')` 定位，
+  watcher 加 `immediate: true`；空 ID 直接返回，不做任何滚动；仍**不**根据正文推断证据。
+
+### BUG-8C2-04｜证据操作目标尺寸不符合 UI_SPEC 9
+
+- 修复（显式声明尺寸，不依赖文字行高）：
+  - [MissingCourseList.vue L117-L130 / L180-L182](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/components/academic/MissingCourseList.vue)
+    `.ep-evidence-chip`：`min-height: 40px`（改为 `inline-flex` 居中）+ 767px 媒体查询 `min-height: 44px`；
+  - [ConflictWarningPanel.vue L178-L202](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/components/academic/ConflictWarningPanel.vue)
+    同上；
+  - [SourceEvidenceCard.vue L150-L168 / L249-L264](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/components/common/SourceEvidenceCard.vue)
+    `.ep-evidence-card__select` 与 `.ep-evidence-card__open` 均 `min-height: 40px`，
+    新增 `__open:focus-visible` 焦点环，767px 媒体查询内二者 `min-height: 44px`。
+  - 保留证据色与键盘操作；`min-height` 不影响宽度，未引入整页横向溢出。
+- 守卫：新增 `frontend/src/tests/hit-target.spec.ts`（源码级样式守卫，9 项），
+  真实 bounding box 留给下一轮 Playwright 验收。
+
+### BUG-8C2-05｜FilePickField disabled 时仍接受拖放
+
+- 根因：[FilePickField.vue](file:///f:/毕业实训/EduPilot%20RAG1/frontend/src/components/common/FilePickField.vue#L38-L63)
+  的 `pick()` / `onSelect()` / `onDrop()` 都没有检查 `disabled`。
+- 修复：三处入口在 `disabled` 时直接返回（drop 不 emit、input change 不 emit、不打开文件对话框）；
+  启用后行为不变，未影响普通上传（`FileUploader`）与 academic 导入（`AcademicImportDialog`）。
+
+### 新增测试
+
+| 文件 | 数量 | 覆盖 |
+|---|---|---|
+| `frontend/src/tests/hit-target.spec.ts` | 9（新增） | 三个组件各自声明桌面 40px、移动 767px 内 44px、并保留 `:focus-visible` 焦点环 |
+| `frontend/src/components/common/FilePickField.spec.ts` | 6（新增） | enabled drop / enabled 选择 / **disabled drop 不 emit** / **disabled change 不 emit** / disabled 时 input 与按钮禁用 / hint 关联 |
+| `frontend/src/components/academic/PlanningEvidencePanel.spec.ts` | +3 | 挂载前已有 focused id 也会滚动（spy `scrollIntoView`）/ 后续变化再次滚动 / 无 id 不滚动 |
+| `frontend/src/views/PlanningView.spec.ts` | +5 | 数组型重复 `record_set_id` 从 URL 删除且保留 `tab`、不自动选中 / 空串字段清理且不影响有效字段 / 挂载后 push 有效 query 恢复且**不重复加载 options** / 历史后退回到上一组选择且不重复加载 options / 挂载后推入无效数组 query 被清理且不循环 |
+
+### 修复后验收
+
+- 定向（同 4 个文件）→ `Test Files 4 passed (4)`、**`Tests 51 passed (51)`**，退出码 0。
+- `docker compose exec frontend pnpm test` → **38 files / 449 passed**，退出码 0（上一轮 426，净 +23）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → 退出码 0（后端未改动）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`；
+  `GET /api/academic/options`（只读）→ `{"record_sets":[],"rule_sets":[]}`；`git diff --check` 无输出。
+- **真实浏览器只读验证**（未点击导入 / 计算 / 上传 / seed / 删除）：
+  - `?record_set_id=rs-1&record_set_id=rs-2&tab=x` → 地址栏最终为 `?tab=x`（重复字段已删除）、
+    显示失效提示、课程记录选择器保持未选中；
+  - `/planning?rule_set_id=ru-9&note=y` → 失效字段被删除（`?note=y`）；
+    `history.back()` 回到 `?tab=x`、`history.forward()` 回到 `?note=y`，两次都无残留失效字段、
+    选择器与 URL 一致、页面结构完好；
+  - 同源 iframe 实测 390 / 1024 / 1440：`scrollWidth === clientWidth`（375 / 1024 / 1440），
+    **无整页横向溢出**，三档 iframe 内的地址栏同样只剩 `?tab=probe…`（重复字段被清理）；
+  - 网络记录**零写请求**（无 POST / PUT / PATCH / DELETE）；新标签页控制台 `Console messages: (none)`。
+
+### 统计基线更正
+
+- `frontend/src/views/PlanningView.spec.ts` 在 8C-2 的本轮基线为 **21 项**（不是 22 项）：
+  上一节「修改」表与「新增测试」表中的 22 已更正为 21；历史真实记录未被改写。
+
+### 下一步
+
+**阶段 8 最终收尾：Playwright 端到端与三档视口验收**（UI_SPEC 11.2 的 8 个场景），
+之后进入阶段 9 RAG 评测与安全测试。
+
 ## 阶段 8C-2 结论（完整学业规划页面）
 
 阶段 8 = `in_progress`；8A / 8B-1 / 8B-2 / 8C-1 = `completed`；**8C-2 = `completed`**；
@@ -501,7 +610,7 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 | 文件 | 变更 |
 |---|---|
 | `frontend/src/views/PlanningView.vue` | 占位页 → 完整页面（门控、URL 恢复、选择、计算、结果、响应式、可访问性） |
-| `frontend/src/views/PlanningView.spec.ts` | 新增 22 项页面测试 |
+| `frontend/src/views/PlanningView.spec.ts` | 新增 21 项页面测试 |
 | `frontend/src/domain/academic.ts` | 新增 `readSelectionQuery` / `resolveSelectionInput` / `computeBreakdown` / `formatCredit` / `buildCategoryGapBreakdown` / `conflictGroup(Label)` / `describeSeverity` / `resolvePlanResultContext` / `linkEvidence`；`buildProgressBreakdown` 改为复用 `computeBreakdown` 并新增 `progressPercent` |
 | `frontend/src/stores/academic.ts` | 新增 `restoreSelection(query)` 与一次性 `pendingInput`；`applyOptions` 拆为 `applyResolution` + `resolveSelectionInput` |
 | `frontend/src/components/chat/EvidencePanel.vue` | 改为渲染共享 `SourceEvidenceCard`（控件类名、`aria-pressed`、行为保持不变） |
@@ -562,7 +671,7 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 
 | 文件 | 数量 | 覆盖 |
 |---|---|---|
-| `frontend/src/views/PlanningView.spec.ts` | 22 | loading / options empty / options error + retry / planning unavailable / 后端不可达 + 重新检测 / 不自动导入与计算 / 单选预选 / 多选不自动选择 / 有效 URL 恢复并保留无关字段 / 无效 URL 清除并提示 / 不循环（不再触发 options 请求）/ 选择写入 URL / 两 ID 不齐禁用 / 只在点击后计算且防重复 / 首次失败无结果 / 重算失败保留旧结果并标记未更新 / 结果上下文按 ID 而非当前选择 / 来源消失提示 / 窄屏证据抽屉 / 查看原文才请求 sources / 卸载 cancel |
+| `frontend/src/views/PlanningView.spec.ts` | 21 | loading / options empty / options error + retry / planning unavailable / 后端不可达 + 重新检测 / 不自动导入与计算 / 单选预选 / 多选不自动选择 / 有效 URL 恢复并保留无关字段 / 无效 URL 清除并提示 / 不循环（不再触发 options 请求）/ 选择写入 URL / 两 ID 不齐禁用 / 只在点击后计算且防重复 / 首次失败无结果 / 重算失败保留旧结果并标记未更新 / 结果上下文按 ID 而非当前选择 / 来源消失提示 / 窄屏证据抽屉 / 查看原文才请求 sources / 卸载 cancel |
 | `frontend/src/components/academic/AcademicImportDialog.spec.ts` | 10 | records 仅 XLSX / rules 接受三种 / 大小上限 / 可选 name / 空白 name 不发送 / academic 端点且不调用普通上传 / 防重复提交 / 错误码与 request_id / warnings / disabled |
 | `frontend/src/components/academic/CreditSummary.spec.ts` | 7 | 四数字严格绑定 / 0 与一位小数 / 正常进度 / 超额封顶且非错误 / 非法数据 / progressbar ARIA / required=0 |
 | `frontend/src/components/academic/CategoryGapList.spec.ts` | 5 | 五字段 / 不重算 remaining / 三段比例 / 非法就地报错 / 空态 |

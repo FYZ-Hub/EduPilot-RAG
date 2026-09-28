@@ -113,9 +113,13 @@ function linked(course: MissingRequiredCourse): PlanningEvidence[] {
   font-variant-numeric: tabular-nums;
 }
 
+/* UI_SPEC 9：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
 .ep-evidence-chip {
-  min-height: 28px;
-  padding: 0 var(--ep-space-2);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  min-height: 40px;
+  padding: 0 var(--ep-space-3);
   border: 1px solid var(--ep-color-evidence);
   border-radius: 999px;
   background: var(--ep-color-evidence-soft);
@@ -171,6 +175,10 @@ function linked(course: MissingRequiredCourse): PlanningEvidence[] {
     min-width: 72px;
     color: var(--ep-color-text-muted);
     content: attr(data-label);
+  }
+
+  .ep-evidence-chip {
+    min-height: 44px;
   }
 }
 </style>

@@ -12,7 +12,7 @@ import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter, type LocationQuery } from 'vue-router'
 
 import type { PlanningEvidence } from '@/api/academic'
-import { resolvePlanResultContext } from '@/domain/academic'
+import { readSelectionQuery, resolvePlanResultContext } from '@/domain/academic'
 import ErrorAlert from '@/components/common/ErrorAlert.vue'
 import PageHeader from '@/components/common/PageHeader.vue'
 import SourceDrawer from '@/components/common/SourceDrawer.vue'
@@ -93,6 +93,20 @@ const importDisabledReason = computed(() => {
   return '正在读取规划数据，稍后再试。'
 })
 
+/** 只有「缺失」或「单个非空字符串」才是规范 query 值；空串 / 数组 / null / 其它类型都必须清理。 */
+function isCanonicalQueryValue(value: unknown): boolean {
+  return value === undefined || (typeof value === 'string' && value.trim() !== '')
+}
+
+function canonicalQueryValue(value: unknown): string | null {
+  return typeof value === 'string' && value.trim() !== '' ? value.trim() : null
+}
+
+/** 当前 URL 的两个选择字段都已经是规范形式。 */
+function isCanonicalSelectionQuery(query: LocationQuery): boolean {
+  return isCanonicalQueryValue(query.record_set_id) && isCanonicalQueryValue(query.rule_set_id)
+}
+
 function syncQuery(): void {
   const current = route.query
   const next: LocationQuery = { ...current }
@@ -111,7 +125,8 @@ function syncQuery(): void {
     delete next.rule_set_id
   }
 
-  if (sameSelectionQuery(current, next)) {
+  // 非规范形式（数组 / 空串 / null）必须回写清理，不能因为「都归一化成没有」就跳过
+  if (isCanonicalSelectionQuery(current) && sameSelectionQuery(current, next)) {
     return
   }
   void router.replace({ query: next })
@@ -119,14 +134,33 @@ function syncQuery(): void {
 
 function sameSelectionQuery(left: LocationQuery, right: LocationQuery): boolean {
   return (
-    stringOf(left.record_set_id) === stringOf(right.record_set_id) &&
-    stringOf(left.rule_set_id) === stringOf(right.rule_set_id)
+    canonicalQueryValue(left.record_set_id) === canonicalQueryValue(right.record_set_id) &&
+    canonicalQueryValue(left.rule_set_id) === canonicalQueryValue(right.rule_set_id)
   )
 }
 
-function stringOf(value: unknown): string | undefined {
-  return typeof value === 'string' ? value : undefined
+/** URL 与当前选择已经一致（含本页 replace 造成的回写），此时不得再次恢复或回写。 */
+function queryMatchesSelection(): boolean {
+  const input = readSelectionQuery(route.query)
+  return (
+    !input.record.malformed &&
+    !input.rule.malformed &&
+    input.record.value === academic.selectedRecordSetId &&
+    input.rule.value === academic.selectedRuleSetId
+  )
 }
+
+watch(
+  () => [route.query.record_set_id, route.query.rule_set_id] as const,
+  async () => {
+    if (queryMatchesSelection()) {
+      // 无关 query（如 tab）变化或本页回写：既不重新恢复选择，也不重复请求 options
+      return
+    }
+    await academic.restoreSelection(route.query)
+    syncQuery()
+  },
+)
 
 watch(
   () => [academic.selectedRecordSetId, academic.selectedRuleSetId] as const,

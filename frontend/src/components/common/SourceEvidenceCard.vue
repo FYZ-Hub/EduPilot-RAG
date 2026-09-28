@@ -151,9 +151,10 @@ function rowRange(
 .ep-evidence-card__select {
   display: flex;
   gap: var(--ep-space-2);
-  align-items: baseline;
+  align-items: center;
   width: 100%;
   min-width: 0;
+  min-height: 40px;
   padding: 0;
   border: 0;
   background: transparent;
@@ -243,5 +244,23 @@ function rowRange(
   line-height: 1.6;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
+}
+
+/* UI_SPEC 9：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
+.ep-evidence-card__open {
+  min-height: 40px;
+  padding: 0 var(--ep-space-2);
+}
+
+.ep-evidence-card__open:focus-visible {
+  outline: 2px solid var(--ep-color-primary);
+  outline-offset: 2px;
+}
+
+@media (max-width: 767px) {
+  .ep-evidence-card__select,
+  .ep-evidence-card__open {
+    min-height: 44px;
+  }
 }
 </style>
