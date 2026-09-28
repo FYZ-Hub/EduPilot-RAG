@@ -10,7 +10,6 @@
  * - 请求期间按钮 loading 并阻止重复提交；不在浏览器日志中输出文件内容。
  */
 import { computed, ref, watch } from 'vue'
-import { UploadFilled } from '@element-plus/icons-vue'
 
 import { toApiError, type ApiError } from '@/api/client'
 import {
@@ -22,6 +21,7 @@ import {
 } from '@/api/documents'
 import { fileTypeLabel } from '@/domain/documents'
 import { apiErrorCodeLabel, apiErrorRequestIdLabel } from '@/domain/apiError'
+import FilePickField from '@/components/common/FilePickField.vue'
 
 const props = withDefaults(
   defineProps<{
@@ -58,7 +58,6 @@ const DISPOSITION_MESSAGES: Record<UploadDisposition, string> = {
 
 const queue = ref<QueueItem[]>([])
 const uploading = ref(false)
-const inputRef = ref<HTMLInputElement | null>(null)
 let counter = 0
 
 const visible = computed({
@@ -107,8 +106,8 @@ function formatSize(bytes: number): string {
   return `${Math.max(1, Math.round(bytes / 1024))}KB`
 }
 
-function addFiles(files: FileList | File[]): void {
-  for (const file of Array.from(files)) {
+function addFiles(files: File[]): void {
+  for (const file of files) {
     const extension = extensionOf(file.name)
     let status: ItemStatus = 'pending'
     let message: string | null = null
@@ -137,25 +136,6 @@ function addFiles(files: FileList | File[]): void {
       retryable,
     })
   }
-}
-
-function onSelect(event: Event): void {
-  const target = event.target as HTMLInputElement
-  if (target.files) {
-    addFiles(target.files)
-  }
-  target.value = ''
-}
-
-function onDrop(event: DragEvent): void {
-  const files = event.dataTransfer?.files
-  if (files) {
-    addFiles(files)
-  }
-}
-
-function pickFiles(): void {
-  inputRef.value?.click()
 }
 
 function removeItem(id: string): void {
@@ -226,26 +206,15 @@ async function retryItem(item: QueueItem): Promise<void> {
     </div>
 
     <template v-else>
-      <div
-        class="ep-uploader__drop"
-        @dragover.prevent
-        @drop.prevent="onDrop"
-      >
-        <ElIcon :size="24"><UploadFilled /></ElIcon>
-        <p class="ep-uploader__drop-title">拖拽文件到此处，或点击选择文件</p>
-        <p id="ep-uploader-hint" class="ep-uploader__hint">{{ hintText }}</p>
-        <ElButton :disabled="uploading" @click="pickFiles">选择文件</ElButton>
-        <input
-          ref="inputRef"
-          class="ep-uploader__input"
-          type="file"
-          multiple
-          aria-label="选择要上传的文件"
-          aria-describedby="ep-uploader-hint"
-          :accept="ALLOWED_UPLOAD_EXTENSIONS.map((item) => `.${item}`).join(',')"
-          @change="onSelect"
-        />
-      </div>
+      <FilePickField
+        multiple
+        :accept="ALLOWED_UPLOAD_EXTENSIONS"
+        :disabled="uploading"
+        :hint="hintText"
+        hint-id="ep-uploader-hint"
+        aria-label="选择要上传的文件"
+        @files="addFiles"
+      />
 
       <ul v-if="queue.length" class="ep-uploader__queue">
         <li v-for="item in queue" :key="item.id" class="ep-uploader__item">
@@ -335,44 +304,6 @@ async function retryItem(item: QueueItem): Promise<void> {
 </template>
 
 <style scoped>
-.ep-uploader__drop {
-  display: flex;
-  flex-direction: column;
-  align-items: center;
-  gap: var(--ep-space-2);
-  padding: var(--ep-space-6) var(--ep-space-4);
-  border: 1px dashed var(--ep-color-border);
-  border-radius: var(--ep-radius-card);
-  background-color: var(--ep-color-surface-subtle);
-  text-align: center;
-  color: var(--ep-color-text-secondary);
-}
-
-.ep-uploader__drop-title {
-  font-size: 14px;
-  line-height: 22px;
-  font-weight: 500;
-  color: var(--ep-color-text);
-}
-
-.ep-uploader__hint {
-  font-size: 12px;
-  line-height: 18px;
-  color: var(--ep-color-text-muted);
-}
-
-.ep-uploader__input {
-  position: absolute;
-  width: 1px;
-  height: 1px;
-  padding: 0;
-  margin: -1px;
-  overflow: hidden;
-  clip: rect(0, 0, 0, 0);
-  white-space: nowrap;
-  border: 0;
-}
-
 .ep-uploader__queue {
   display: flex;
   flex-direction: column;

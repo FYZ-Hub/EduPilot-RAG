@@ -1,10 +1,19 @@
 import { describe, expect, it } from 'vitest'
 
-import type { AcademicOptions, PlanningResult } from '@/api/academic'
+import type { AcademicOptions, CategoryGap, PlanningEvidence, PlanningResult } from '@/api/academic'
 
 import {
+  buildCategoryGapBreakdown,
   buildProgressBreakdown,
+  conflictGroup,
+  conflictGroupLabel,
+  describeSeverity,
+  formatCredit,
+  linkEvidence,
+  readSelectionQuery,
   resolveAcademicSelection,
+  resolvePlanResultContext,
+  resolveSelectionInput,
   summariseCredits,
 } from './academic'
 
@@ -267,5 +276,200 @@ describe('academic progress breakdown', () => {
 
     expect(result).toEqual(snapshot)
     expect(result.required_credits).toBe(155.0)
+  })
+})
+
+describe('academic selection query normalisation', () => {
+  it('reads present string ids as the query values', () => {
+    const input = readSelectionQuery({ record_set_id: 'rs-1', rule_set_id: ' ru-1 ' })
+
+    expect(input.record).toEqual({ value: 'rs-1', malformed: false })
+    expect(input.rule).toEqual({ value: 'ru-1', malformed: false })
+  })
+
+  it('treats absent values as not provided rather than invalid', () => {
+    const input = readSelectionQuery({})
+
+    expect(input.record).toEqual({ value: null, malformed: false })
+    expect(input.rule).toEqual({ value: null, malformed: false })
+  })
+
+  it('treats empty strings, arrays and non-strings as malformed', () => {
+    expect(readSelectionQuery({ record_set_id: '' }).record.malformed).toBe(true)
+    expect(readSelectionQuery({ record_set_id: ['rs-1'] }).record.malformed).toBe(true)
+    expect(readSelectionQuery({ rule_set_id: ['ru-1', 'ru-2'] }).rule.malformed).toBe(true)
+    expect(readSelectionQuery({ rule_set_id: 42 }).rule.malformed).toBe(true)
+  })
+
+  it('resolves a valid query against the options', () => {
+    const resolution = resolveSelectionInput(options(['rs-1'], ['ru-1']), {
+      record: { value: 'rs-1', malformed: false },
+      rule: { value: 'ru-1', malformed: false },
+    })
+
+    expect(resolution.recordSetId).toBe('rs-1')
+    expect(resolution.ruleSetId).toBe('ru-1')
+    expect(resolution.staleRecordSelection).toBe(false)
+    expect(resolution.staleRuleSelection).toBe(false)
+  })
+
+  it('reports a malformed field as stale even when a replacement option exists', () => {
+    const resolution = resolveSelectionInput(options(['rs-9'], ['ru-9']), {
+      record: { value: null, malformed: true },
+      rule: { value: null, malformed: false },
+    })
+
+    expect(resolution.recordSetId).toBe('rs-9')
+    expect(resolution.staleRecordSelection).toBe(true)
+    expect(resolution.staleRuleSelection).toBe(false)
+  })
+
+  it('does not mutate the options it reads', () => {
+    const payload = options(['rs-1'], ['ru-1'])
+    const snapshot = JSON.parse(JSON.stringify(payload))
+
+    resolveSelectionInput(payload, { record: { value: 'rs-9', malformed: false }, rule: { value: null, malformed: false } })
+
+    expect(payload).toEqual(snapshot)
+  })
+})
+
+describe('academic credit formatting', () => {
+  it('always shows one decimal and never hides zero', () => {
+    expect(formatCredit(0)).toBe('0.0')
+    expect(formatCredit(155)).toBe('155.0')
+    expect(formatCredit(12.34)).toBe('12.3')
+    expect(formatCredit(100.5)).toBe('100.5')
+  })
+
+  it('keeps invalid numbers explicit instead of correcting them', () => {
+    expect(formatCredit(Number.NaN)).toBe('NaN')
+    expect(formatCredit(Number.POSITIVE_INFINITY)).toBe('Infinity')
+    expect(formatCredit(-1)).toBe('-1.0')
+  })
+})
+
+describe('category gap breakdown', () => {
+  function gap(overrides: Partial<CategoryGap> = {}): CategoryGap {
+    return {
+      category: '专业必修',
+      required_credits: 60.0,
+      completed_credits: 40.0,
+      in_progress_credits: 12.0,
+      remaining_credits: 8.0,
+      ...overrides,
+    }
+  }
+
+  it('builds a three-part bar without recomputing the server remaining credits', () => {
+    const breakdown = buildCategoryGapBreakdown(gap())
+
+    expect(breakdown.valid).toBe(true)
+    expect(breakdown.message).toBeNull()
+    expect(breakdown.segments.map((segment) => segment.key)).toEqual([
+      'completed',
+      'in_progress',
+      'remaining',
+    ])
+    expect(breakdown.segments[0].percent).toBeCloseTo((40 / 60) * 100, 5)
+    expect(breakdown.segments[1].percent).toBeCloseTo((12 / 60) * 100, 5)
+    expect(breakdown.segments[2].percent).toBeCloseTo(100 - (40 / 60) * 100 - (12 / 60) * 100, 5)
+  })
+
+  it('caps an over-achieved category at 100% without calling it invalid', () => {
+    const breakdown = buildCategoryGapBreakdown(
+      gap({ required_credits: 30.0, completed_credits: 40.0, in_progress_credits: 5.0 }),
+    )
+
+    expect(breakdown.valid).toBe(true)
+    expect(breakdown.exceeded).toBe(true)
+    expect(breakdown.totalPercent).toBeLessThanOrEqual(100)
+    expect(breakdown.totalPercent).toBeCloseTo(100, 5)
+  })
+
+  it('reports invalid gap data in place instead of correcting it', () => {
+    const breakdown = buildCategoryGapBreakdown(gap({ completed_credits: Number.NaN }))
+
+    expect(breakdown.valid).toBe(false)
+    expect(breakdown.message).not.toBeNull()
+    expect(breakdown.totalPercent).toBe(0)
+  })
+})
+
+describe('conflict classification', () => {
+  it('maps the known server codes to their categories', () => {
+    expect(conflictGroup('DEGREE_PLAN_VERSION_CONFLICT')).toBe('version')
+    expect(conflictGroup('COURSE_TIME_CONFLICT')).toBe('time')
+    expect(conflictGroup('COURSE_RECORD_CONTRADICTION')).toBe('record')
+  })
+
+  it('keeps other known and unknown codes in the generic group', () => {
+    expect(conflictGroup('COURSE_CATEGORY_MISMATCH')).toBe('other')
+    expect(conflictGroup('SOMETHING_NEW')).toBe('other')
+    expect(conflictGroupLabel('version')).toBe('规则版本冲突')
+    expect(conflictGroupLabel('other')).toBe('其他提醒')
+  })
+
+  it('labels severity with text instead of relying on colour alone', () => {
+    expect(describeSeverity('blocking')).toMatchObject({ label: '阻断', blocking: true })
+    expect(describeSeverity('warning')).toMatchObject({ label: '提醒', blocking: false })
+    expect(describeSeverity('critical')).toMatchObject({ label: 'critical', blocking: false })
+  })
+})
+
+describe('plan result context', () => {
+  it('resolves the record and rule the result actually belongs to', () => {
+    const context = resolvePlanResultContext(options(['rs-1', 'rs-2'], ['ru-1', 'ru-2']), 'rs-2', 'ru-1')
+
+    expect(context.resolvable).toBe(true)
+    expect(context.recordSet?.id).toBe('rs-2')
+    expect(context.ruleSet?.id).toBe('ru-1')
+  })
+
+  it('reports missing options instead of falling back to another selection', () => {
+    const context = resolvePlanResultContext(options(['rs-2'], ['ru-2']), 'rs-1', 'ru-2')
+
+    expect(context.resolvable).toBe(false)
+    expect(context.recordSet).toBeNull()
+    expect(context.ruleSet?.id).toBe('ru-2')
+  })
+
+  it('is not resolvable without options or without ids', () => {
+    expect(resolvePlanResultContext(null, 'rs-1', 'ru-1').resolvable).toBe(false)
+    expect(resolvePlanResultContext(options(['rs-1'], ['ru-1']), null, 'ru-1').resolvable).toBe(false)
+  })
+})
+
+describe('evidence linking', () => {
+  function evidence(chunkId: string): PlanningEvidence {
+    return {
+      chunk_id: chunkId,
+      doc_id: `doc-${chunkId}`,
+      file_name: `${chunkId}.pdf`,
+      document_version: null,
+      effective_from: null,
+      page_number: 1,
+      sheet_name: null,
+      row_start: null,
+      row_end: null,
+      section_title: null,
+      quote: 'quote',
+    }
+  }
+
+  it('links only ids that exist in the real evidence', () => {
+    const linked = linkEvidence([evidence('c1'), evidence('c2')], ['c1', 'missing'])
+
+    expect(linked.map((item) => item.chunk_id)).toEqual(['c1'])
+  })
+
+  it('keeps a stable order and drops duplicates', () => {
+    const linked = linkEvidence([evidence('c1'), evidence('c2')], ['c2', 'c1', 'c2'])
+
+    expect(linked.map((item) => item.chunk_id)).toEqual(['c2', 'c1'])
+  })
+
+  it('returns nothing when no evidence matches', () => {
+    expect(linkEvidence([], ['c1'])).toEqual([])
   })
 })

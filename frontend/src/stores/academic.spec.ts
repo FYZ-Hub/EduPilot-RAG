@@ -710,3 +710,73 @@ describe('academic store result context', () => {
     expect(store.result).not.toBeNull()
   })
 })
+
+describe('academic store selection restore', () => {
+  it('restores a valid url query after loading the options', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const store = mountStore()
+
+    const resolution = await store.restoreSelection({ record_set_id: 'rs-2', rule_set_id: 'ru-1' })
+
+    expect(resolution.recordSetId).toBe('rs-2')
+    expect(resolution.ruleSetId).toBe('ru-1')
+    expect(resolution.staleRecordSelection).toBe(false)
+    expect(store.selectedRecordSetId).toBe('rs-2')
+    expect(store.selectedRuleSetId).toBe('ru-1')
+  })
+
+  it('clears an invalid url id and reports it as stale', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const store = mountStore()
+
+    const resolution = await store.restoreSelection({ record_set_id: 'gone', rule_set_id: 'ru-2' })
+
+    expect(resolution.staleRecordSelection).toBe(true)
+    expect(store.selectedRecordSetId).toBeNull()
+    expect(store.staleRecordSelection).toBe(true)
+    expect(store.selectedRuleSetId).toBe('ru-2')
+    expect(store.staleRuleSelection).toBe(false)
+  })
+
+  it('treats arrays, empty strings and unknown types as invalid', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1'], ['ru-1']))
+    const store = mountStore()
+
+    await store.restoreSelection({ record_set_id: ['rs-1'], rule_set_id: '' })
+
+    expect(store.staleRecordSelection).toBe(true)
+    expect(store.staleRuleSelection).toBe(true)
+  })
+
+  it('preselects a lone ready option when the url carries no query', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1'], ['ru-1']))
+    const store = mountStore()
+
+    const resolution = await store.restoreSelection({})
+
+    expect(resolution.staleRecordSelection).toBe(false)
+    expect(store.selectedRecordSetId).toBe('rs-1')
+    expect(store.selectedRuleSetId).toBe('ru-1')
+  })
+
+  it('never auto-selects when several options exist and the url is empty', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const store = mountStore()
+
+    await store.restoreSelection({})
+
+    expect(store.selectedRecordSetId).toBeNull()
+    expect(store.selectedRuleSetId).toBeNull()
+  })
+
+  it('reuses already loaded options without another request', async () => {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-1', 'rs-2'], ['ru-1', 'ru-2']))
+    const store = mountStore()
+    await store.loadOptions()
+
+    const resolution = await store.restoreSelection({ record_set_id: 'rs-1' })
+
+    expect(mocks.fetchAcademicOptions).toHaveBeenCalledTimes(1)
+    expect(resolution.recordSetId).toBe('rs-1')
+  })
+})

@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2、8C-1 已完成，8B 整体完成；8C-2、8D 未开始）**
-- 下一阶段：**阶段 8C-2 — 学业规划页面布局与结果展示**（必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）
+- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2、8C-1、8C-2 已完成，8B / 8C 整体完成；阶段 8 剩余端到端验收，阶段 9、10 未开始）**
+- 下一阶段：**阶段 8 收尾（Playwright 端到端与三档视口验收）→ 阶段 9 RAG 评测与安全测试**（8C-2 已交付；`docs/IMPLEMENTATION_PLAN.md` 阶段 8 明确要求 `pnpm exec playwright test`）
 - 最近更新：2026-09-28
 
 ## 阶段状态
@@ -453,6 +453,159 @@ filters 的 `null` / 整数 / 字符串原样提交。筛选选项全部来自�
 ### 下一步
 
 **8C — 学业规划页面**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与 `docs/PRODUCT_SPEC.md` 6.4）。
+
+## 阶段 8C-2 结论（完整学业规划页面）
+
+阶段 8 = `in_progress`；8A / 8B-1 / 8B-2 / 8C-1 = `completed`；**8C-2 = `completed`**；
+**阶段 8C 整体 completed**；阶段 8 仍为 `in_progress`（`docs/IMPLEMENTATION_PLAN.md` 阶段 8
+还包含 `pnpm exec playwright test` 端到端验收，尚未建立 Playwright 套件）。
+本轮把 `PlanningView.vue` 从占位页替换为完整学业规划页面；**只调用既有 Academic API 与 Store**，
+未新增后端接口、未修改后端、未修改 `PRODUCT_SPEC.md` / `UI_SPEC.md`、未新增依赖。
+
+### 开始前基线
+
+- `git status --short` 为空；`git rev-parse --short HEAD` = `ab478c7`。
+- `docker compose ps` → backend `Up (healthy)`、frontend `Up`。
+- `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`。
+- `GET /api/academic/options` → `{"record_sets":[],"rule_sets":[]}`（合法空数组）。
+
+### 实现前失败测试
+
+- 命令：`docker compose exec frontend pnpm vitest run src/domain/academic.spec.ts
+  src/stores/academic.spec.ts src/components/academic src/views/PlanningView.spec.ts`
+- 关键输出：`Test Files 10 failed (10)`、`Tests 45 failed | 50 passed (95)`；
+  典型错误：`Failed to resolve import "./CreditSummary.vue"`（组件尚未创建）、
+  `formatCredit is not a function`、`Cannot read properties of undefined (reading 'trigger')`、
+  `expected "wrappedAction" to be called at least once`（页面未调用 `academic.cancel()`）。
+- 退出码：**1**
+
+### 文件与组件清单
+
+新增：
+
+| 文件 | 职责 |
+|---|---|
+| `frontend/src/components/common/SourceEvidenceCard.vue` | **共享**来源证据卡：Chat 引用面板与规划证据面板共用同一实现 |
+| `frontend/src/components/common/FilePickField.vue` | **共享**纯展示文件选择区（拖拽 + 隐藏 input + 可见按钮），不做校验、不发请求 |
+| `frontend/src/components/academic/AcademicSelectionPanel.vue` | 两个选择器（可见 label、`aria-describedby`、空态、错误 + 重试） |
+| `frontend/src/components/academic/CreditSummary.vue` | 四个数字卡 + 组合进度条（唯一使用 `summariseCredits` / `buildProgressBreakdown`） |
+| `frontend/src/components/academic/CategoryGapList.vue` | 类别缺口横条 + 五个服务端数字 |
+| `frontend/src/components/academic/MissingCourseList.vue` | 缺失必修课表格（窄屏 CSS 转卡片）+ 证据芯片 |
+| `frontend/src/components/academic/ConflictWarningPanel.vue` | 按真实 code 分类的冲突与提醒 |
+| `frontend/src/components/academic/PlanningEvidencePanel.vue` | 计算证据面板（复用共享卡）+ 证据定位高亮 |
+| `frontend/src/components/academic/AcademicImportDialog.vue` | 课程记录 / 培养规则导入（academic 端点，绝不走普通上传） |
+| 上述 8 个组件的 `.spec.ts` | 定向组件测试 |
+
+修改：
+
+| 文件 | 变更 |
+|---|---|
+| `frontend/src/views/PlanningView.vue` | 占位页 → 完整页面（门控、URL 恢复、选择、计算、结果、响应式、可访问性） |
+| `frontend/src/views/PlanningView.spec.ts` | 新增 22 项页面测试 |
+| `frontend/src/domain/academic.ts` | 新增 `readSelectionQuery` / `resolveSelectionInput` / `computeBreakdown` / `formatCredit` / `buildCategoryGapBreakdown` / `conflictGroup(Label)` / `describeSeverity` / `resolvePlanResultContext` / `linkEvidence`；`buildProgressBreakdown` 改为复用 `computeBreakdown` 并新增 `progressPercent` |
+| `frontend/src/stores/academic.ts` | 新增 `restoreSelection(query)` 与一次性 `pendingInput`；`applyOptions` 拆为 `applyResolution` + `resolveSelectionInput` |
+| `frontend/src/components/chat/EvidencePanel.vue` | 改为渲染共享 `SourceEvidenceCard`（控件类名、`aria-pressed`、行为保持不变） |
+| `frontend/src/components/documents/FileUploader.vue` | 拖拽区改用共享 `FilePickField`，删除重复的拖拽 / 选择实现 |
+
+### URL 恢复规则
+
+- URL 字段固定为 `record_set_id` / `rule_set_id`；页面只把 `route.query` 交给
+  `academic.restoreSelection(query)`，**不在页面复制选择算法**（内部仍走
+  `resolveAcademicSelection`）。
+- 归一化：缺失 → 未提供；**空字符串、数组、非字符串 → 按无效处理**（`malformed`）。
+- 有效 ID → 恢复选择；无效 ID 或 `malformed` → 清除该选择、`stale=*` 为 true、
+  从 URL 移除该字段、显示「之前选择的数据已失效，请重新选择」。
+- 无 query 且恰好一个 `ready` 选项 → 预选；多于一个 → 保持未选择（绝不选第一个 / 最新 / 最大年份）。
+- 用户改变选择后用 `router.replace` 写回 **两个** 字段，并**保留无关 query 字段**；
+  写入前比较这两个键，避免 Store 与 URL 相互触发形成循环。
+- 页面挂载后只做一次恢复（不 watch `route.query`），刷新页面可恢复。
+
+### 导入隔离证明
+
+- `AcademicImportDialog` 只调用 `academic.importRecords()` / `academic.importRules()`，
+  即 `POST /api/academic/records/import` 与 `POST /api/academic/rules/import`。
+- 组件测试 `vi.mock('@/api/documents')` 后断言 `uploadDocument` **从未被调用**，
+  证明学业文件不会进入 `POST /api/documents` 与普通 RAG 上传流水线。
+- 客户端仅做扩展名（records 只允许 XLSX；rules 允许 PDF / DOCX / XLSX）与 50MB 预检，
+  服务端仍执行最终校验；`name` 去空白后为空时不发送。
+- 成功后由 Store 刷新 options；多选项时不自动选中新项目；`warnings` 原样展示。
+
+### 结果上下文处理
+
+- 结果标题只依据 `resultRecordSetId` / `resultRuleSetId` 与 `options` 匹配
+  （`resolvePlanResultContext`），**不用当前选择冒充结果上下文**。
+- 旧结果的选项已从 options 消失时：显示「上一份结果的数据来源已失效」，不展示任何内部 UUID，
+  结果保留并标记未更新。
+- `resultNotUpdated` 为 true 时显示提示：计算错误给出「本次计算失败，当前结果未更新」，
+  仅选择变化时给出「当前结果未更新：所选数据与展示结果不一致」。
+
+### 进度展示算法
+
+- 单一计算点 `computeBreakdown(required, completed, inProgress)`：已修段封顶 required、
+  在修段封顶剩余空间、剩余段补足到 required，总宽恒 ≤ 100%，并额外输出
+  `progressPercent`（进度条 `aria-valuenow`）。
+- `buildProgressBreakdown(result)` 与 `buildCategoryGapBreakdown(gap)` 共用它；
+  类别缺口**不重新计算**服务端 `remaining_credits`（测试用 `remaining=99.0` 验证原样展示）。
+- `formatCredit` 统一一位小数且不隐藏 0；非法值（负数 / `NaN` / `±Infinity`）原样展示并给出数据错误。
+- `completed + in_progress > required` → 显示「已超过要求」，不是数据错误；`required=0` 且有非零进度才是数据错误。
+
+### 证据复用方式
+
+- 抽出 `SourceEvidenceCard.vue`，`chat/EvidencePanel.vue` 与 `academic/PlanningEvidencePanel.vue`
+  **同时渲染它**（Chat 侧 `selectable`，规划侧为静态标题 + 查看原文），不存在第二套来源展示逻辑。
+- 点击「查看原文」才调用 `GET /api/sources/{chunk_id}`（复用现有 `SourceDrawer.vue`），
+  不预取全部原文、不解释 HTML、不自动打开链接。
+- 缺失必修课与冲突提醒的 `evidence_chunk_ids` 经 `linkEvidence()` 只关联 `result.evidence`
+  中真实存在的 chunk（测试用不存在的 ID 验证不会创建虚构证据），点击芯片会高亮并滚动到对应卡片。
+
+### 新增测试
+
+| 文件 | 数量 | 覆盖 |
+|---|---|---|
+| `frontend/src/views/PlanningView.spec.ts` | 22 | loading / options empty / options error + retry / planning unavailable / 后端不可达 + 重新检测 / 不自动导入与计算 / 单选预选 / 多选不自动选择 / 有效 URL 恢复并保留无关字段 / 无效 URL 清除并提示 / 不循环（不再触发 options 请求）/ 选择写入 URL / 两 ID 不齐禁用 / 只在点击后计算且防重复 / 首次失败无结果 / 重算失败保留旧结果并标记未更新 / 结果上下文按 ID 而非当前选择 / 来源消失提示 / 窄屏证据抽屉 / 查看原文才请求 sources / 卸载 cancel |
+| `frontend/src/components/academic/AcademicImportDialog.spec.ts` | 10 | records 仅 XLSX / rules 接受三种 / 大小上限 / 可选 name / 空白 name 不发送 / academic 端点且不调用普通上传 / 防重复提交 / 错误码与 request_id / warnings / disabled |
+| `frontend/src/components/academic/CreditSummary.spec.ts` | 7 | 四数字严格绑定 / 0 与一位小数 / 正常进度 / 超额封顶且非错误 / 非法数据 / progressbar ARIA / required=0 |
+| `frontend/src/components/academic/CategoryGapList.spec.ts` | 5 | 五字段 / 不重算 remaining / 三段比例 / 非法就地报错 / 空态 |
+| `frontend/src/components/academic/MissingCourseList.spec.ts` | 6 | 五字段只读 / 表头 / 证据只关联真实 chunk / 芯片事件 / 无匹配不虚构 / 空态 |
+| `frontend/src/components/academic/ConflictWarningPanel.spec.ts` | 6 | 空态绿色中性 / 三类分组 / 未知 code 保留 / severity 文字 / 证据芯片 / 纯文本 |
+| `frontend/src/components/academic/PlanningEvidencePanel.spec.ts` | 7 | 只显示真实字段 / 缺失定位不出空标签 / XLSX 定位 / 点击才 open-source / 定位高亮 / HTML 纯文本 / 空态 |
+| `frontend/src/components/academic/AcademicSelectionPanel.spec.ts` | 6 | 可见 label / 选项真实字段 / 只 emit 不自行选择 / 空态 / 错误 + 重试 / loading + disabled |
+| `frontend/src/domain/academic.spec.ts` | +20 | query 归一化 6 / 学分数值格式化 2 / 类别缺口 3 / 冲突分类 3 / 结果上下文 3 / 证据关联 3 |
+| `frontend/src/stores/academic.spec.ts` | +6 | restoreSelection：有效 / 无效 / 数组与空串 / 单选预选 / 多选不选 / 复用已加载 options |
+
+### 验收
+
+- 实现前定向测试：退出码 **1**（`Test Files 10 failed (10)`、`Tests 45 failed | 50 passed (95)`）。
+- 实现后定向（同 10 个文件）→ `Test Files 10 passed (10)`、**`Tests 143 passed (143)`**，退出码 0。
+- `docker compose exec frontend pnpm test` → **36 files / 426 passed**，退出码 0（8C-1 修复轮为 332，净 +94）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0
+  （首轮因 spec 的 `DOMWrapper` / `attributes()` 返回 `string | undefined` 报 TS2345 / TS2532，
+  已修正后通过）。
+- `docker compose exec backend pytest -q` → 退出码 0（后端未改动；本会话同套件记录 **675 passed, 1 warning**）。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`；
+  `GET /api/academic/options`（只读）→ `{"record_sets":[],"rule_sets":[]}`；`git diff --check` 无输出。
+- **真实浏览器只读检查**（未导入、未点击计算、未 seed / 上传 / 删除）：
+  - `/planning` 正常打开，显示证据色标签「结果由确定性规则引擎计算；AI 仅负责解释」、
+    两个空态「还没有可用的课程记录 / 还没有可用的培养方案规则」，两个选择器均为未选中，
+    「开始计算」为 disabled；
+  - 网络记录**只有 GET**：`/api/health`、`/api/academic/options`、`/api/documents`、`/api/demo/status`，
+    **零 POST**（`academicPosts` 为空）；新标签页控制台 `Console messages: (none)`；
+  - 同源 iframe 实测 390 / 1024 / 1440 三档宽度：
+    `scrollWidth === clientWidth`（375 / 1024 / 1440），**无整页横向溢出**，三档均渲染空态与证据标签。
+  - 说明：该检查只用只读方式（导航 + `evaluate` 读取 + 同源 iframe 测量），未点击任何按钮。
+
+### 安全边界（本轮严格遵守）
+
+未修改任何 `.env`；未配置或调用真实 LLM（`chat` 仍为 `unconfigured`）；未下载模型；
+未调用真实外部 API；未真实导入任何 academic 文件；未真实调用 `POST /api/academic/plan`；
+未 seed、未上传、未删除任何文档；未修改后端；未修改 `PRODUCT_SPEC.md` / `UI_SPEC.md`；
+未新增依赖；未硬编码任何学分、专业、版本或学生；全部完整结果场景使用 Mock API / Mock Store。
+
+### 下一步
+
+阶段 8 剩余端到端验收（`pnpm exec playwright test`，UI_SPEC 11.2 的 8 个场景与三档视口），
+随后进入阶段 9 RAG 评测与安全测试。
 
 ## 阶段 8C-1 结论（学业规划前端接口、状态机与确定性展示辅助层）
 

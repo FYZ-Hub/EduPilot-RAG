@@ -27,8 +27,10 @@ import {
 } from '@/api/academic'
 import { ApiError, toApiError } from '@/api/client'
 import {
-  resolveAcademicSelection,
-  type AcademicSelectionQuery,
+  readSelectionQuery,
+  resolveSelectionInput,
+  type AcademicSelection,
+  type AcademicSelectionInput,
 } from '@/domain/academic'
 
 export const useAcademicStore = defineStore('academic', () => {
@@ -58,6 +60,15 @@ export const useAcademicStore = defineStore('academic', () => {
   let optionsSequence = 0
   let planController: AbortController | null = null
   let planSequence = 0
+  /** 由 ``restoreSelection`` 注入的一次性 URL query，只被最新一次 ``loadOptions`` 消费。 */
+  let pendingInput: AcademicSelectionInput | null = null
+  /** 最近一次解析结果，供 ``restoreSelection`` 直接返回给页面。 */
+  let lastResolution: AcademicSelection = {
+    recordSetId: null,
+    ruleSetId: null,
+    staleRecordSelection: false,
+    staleRuleSelection: false,
+  }
 
   /** 是否已经有一份可归属的成功结果。 */
   function hasResultContext(): boolean {
@@ -92,9 +103,8 @@ export const useAcademicStore = defineStore('academic', () => {
     calculating.value = false
   }
 
-  /** 用最新 options 与当前选择恢复状态；选择有效性由纯函数判定。 */
-  function applyOptions(next: AcademicOptions, query: AcademicSelectionQuery): void {
-    const resolution = resolveAcademicSelection(next, query)
+  /** 用最新 options 与一份已解析的选择写回状态；选择有效性由纯函数判定。 */
+  function applyResolution(next: AcademicOptions, resolution: AcademicSelection): void {
     const changed =
       resolution.recordSetId !== selectedRecordSetId.value ||
       resolution.ruleSetId !== selectedRuleSetId.value
@@ -104,11 +114,20 @@ export const useAcademicStore = defineStore('academic', () => {
     selectedRuleSetId.value = resolution.ruleSetId
     staleRecordSelection.value = resolution.staleRecordSelection
     staleRuleSelection.value = resolution.staleRuleSelection
+    lastResolution = resolution
 
     // 选择完全没变时不得中止在途计算、也不得把结果标记为未更新
     if (changed) {
       invalidateInFlightPlan()
       syncResultForSelection()
+    }
+  }
+
+  /** 当前选择作为一次「无 URL query」的解析输入。 */
+  function currentSelectionInput(): AcademicSelectionInput {
+    return {
+      record: { value: selectedRecordSetId.value, malformed: false },
+      rule: { value: selectedRuleSetId.value, malformed: false },
     }
   }
 
@@ -123,10 +142,6 @@ export const useAcademicStore = defineStore('academic', () => {
     const controller = new AbortController()
     optionsController = controller
 
-    const currentSelection = {
-      record_set_id: selectedRecordSetId.value,
-      rule_set_id: selectedRuleSetId.value,
-    }
     optionsLoading.value = true
 
     try {
@@ -134,7 +149,9 @@ export const useAcademicStore = defineStore('academic', () => {
       if (sequence !== optionsSequence) {
         return
       }
-      applyOptions(next, currentSelection)
+      const input = pendingInput ?? currentSelectionInput()
+      pendingInput = null
+      applyResolution(next, resolveSelectionInput(next, input))
       optionsError.value = null
     } catch (caught) {
       if (sequence !== optionsSequence) {
@@ -172,6 +189,28 @@ export const useAcademicStore = defineStore('academic', () => {
     staleRuleSelection.value = false
     invalidateInFlightPlan()
     syncResultForSelection()
+  }
+
+  /**
+   * URL 恢复入口：用路由 query 重新解析选择。
+   *
+   * - 复用 ``resolveAcademicSelection``（经 ``resolveSelectionInput``），不在页面复制选择算法；
+   * - 选项尚未加载时按该 query 先载入 options；
+   * - 返回本次解析结果，供页面移除失效的 URL 字段并提示用户。
+   */
+  async function restoreSelection(raw: {
+    record_set_id?: unknown
+    rule_set_id?: unknown
+  }): Promise<AcademicSelection> {
+    const input = readSelectionQuery(raw)
+    if (options.value === null) {
+      pendingInput = input
+      await loadOptions()
+      return lastResolution
+    }
+    const resolution = resolveSelectionInput(options.value, input)
+    applyResolution(options.value, resolution)
+    return resolution
   }
 
   /** 中止在途的 options / 规划请求；空闲或重复调用都是安全的空操作，不算错误。 */
@@ -311,6 +350,7 @@ export const useAcademicStore = defineStore('academic', () => {
     importRecordsError,
     importRulesError,
     loadOptions,
+    restoreSelection,
     selectRecordSet,
     selectRuleSet,
     cancel,
