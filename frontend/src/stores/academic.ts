@@ -6,6 +6,9 @@
  * - **绝不**自行挑选「最新 / 第一个 / 最后一个」选项；多选项时保持未选择，等待用户操作；
  * - 刷新 options 后，已消失的选择必须清除并标记 stale；
  * - 同一时间只允许一个 options 请求与一个规划请求；新请求取代旧请求，旧响应不得覆盖新状态；
+ * - **结果上下文绑定**：成功结果同时保存它所属的 record / rule ID，只有当前选择与结果上下文
+ *   完全一致时 ``resultNotUpdated`` 才为 false；选择一旦改变，在途请求立即作废（即使对方
+ *   忽略 AbortSignal），旧结果保留但标记为「未更新」，切回原组合时恢复为「已更新」；
  * - 重新计算期间保留上一份成功结果；重算失败时结果保留并设置 ``resultNotUpdated=true``；
  * - 失败不自动重试；不调用 LLM / Chat / Embedding / Reranker。
  */
@@ -39,6 +42,9 @@ export const useAcademicStore = defineStore('academic', () => {
   const staleRuleSelection = ref(false)
 
   const result = ref<PlanningResult | null>(null)
+  /** 当前 ``result`` 实际属于哪一组选择；没有成功结果时两者均为 null。 */
+  const resultRecordSetId = ref<string | null>(null)
+  const resultRuleSetId = ref<string | null>(null)
   const calculating = ref(false)
   const calculationError = ref<ApiError | null>(null)
   const resultNotUpdated = ref(false)
@@ -53,14 +59,57 @@ export const useAcademicStore = defineStore('academic', () => {
   let planController: AbortController | null = null
   let planSequence = 0
 
+  /** 是否已经有一份可归属的成功结果。 */
+  function hasResultContext(): boolean {
+    return result.value !== null && resultRecordSetId.value !== null && resultRuleSetId.value !== null
+  }
+
+  /** 当前选择是否与已知结果的上下文完全一致。 */
+  function resultMatchesSelection(): boolean {
+    return (
+      hasResultContext() &&
+      resultRecordSetId.value === selectedRecordSetId.value &&
+      resultRuleSetId.value === selectedRuleSetId.value
+    )
+  }
+
+  /** 没有成功结果时「未更新」无意义，必须保持 false；否则由上下文是否一致决定。 */
+  function refreshResultNotUpdated(): void {
+    resultNotUpdated.value = hasResultContext() && !resultMatchesSelection()
+  }
+
+  /** 选择或结果上下文变化后同步「未更新」标记。 */
+  function syncResultForSelection(): void {
+    calculationError.value = null
+    refreshResultNotUpdated()
+  }
+
+  /** 作废在途规划请求：即使对方忽略 AbortSignal 并最终 resolve/reject 也不得写入状态。 */
+  function invalidateInFlightPlan(): void {
+    planSequence += 1
+    planController?.abort()
+    planController = null
+    calculating.value = false
+  }
+
   /** 用最新 options 与当前选择恢复状态；选择有效性由纯函数判定。 */
   function applyOptions(next: AcademicOptions, query: AcademicSelectionQuery): void {
     const resolution = resolveAcademicSelection(next, query)
+    const changed =
+      resolution.recordSetId !== selectedRecordSetId.value ||
+      resolution.ruleSetId !== selectedRuleSetId.value
+
     options.value = next
     selectedRecordSetId.value = resolution.recordSetId
     selectedRuleSetId.value = resolution.ruleSetId
     staleRecordSelection.value = resolution.staleRecordSelection
     staleRuleSelection.value = resolution.staleRuleSelection
+
+    // 选择完全没变时不得中止在途计算、也不得把结果标记为未更新
+    if (changed) {
+      invalidateInFlightPlan()
+      syncResultForSelection()
+    }
   }
 
   /**
@@ -106,13 +155,23 @@ export const useAcademicStore = defineStore('academic', () => {
   }
 
   function selectRecordSet(id: string | null): void {
+    if (selectedRecordSetId.value === id) {
+      return
+    }
     selectedRecordSetId.value = id
     staleRecordSelection.value = false
+    invalidateInFlightPlan()
+    syncResultForSelection()
   }
 
   function selectRuleSet(id: string | null): void {
+    if (selectedRuleSetId.value === id) {
+      return
+    }
     selectedRuleSetId.value = id
     staleRuleSelection.value = false
+    invalidateInFlightPlan()
+    syncResultForSelection()
   }
 
   /** 中止在途的 options / 规划请求；空闲或重复调用都是安全的空操作，不算错误。 */
@@ -174,7 +233,8 @@ export const useAcademicStore = defineStore('academic', () => {
 
   /**
    * 计算规划。两个 ID 不齐全时安全返回、不发请求；同一时间只允许一个请求；
-   * 成功时原样保存服务端结果，重算失败时保留上一份结果并标记「未更新」。
+   * 成功时同时记录结果与它所属的 record / rule 上下文，且**只有**请求序号仍是最新
+   * 且当前选择仍等于本次请求的两个 ID 时才允许写入。
    */
   async function calculate(): Promise<void> {
     if (calculating.value) {
@@ -192,19 +252,27 @@ export const useAcademicStore = defineStore('academic', () => {
     planController = controller
     calculating.value = true
 
+    /** 旧响应（序号过期）或选择已改变时，一律不得覆盖当前状态。 */
+    const responseStillApplies = (): boolean =>
+      sequence === planSequence &&
+      selectedRecordSetId.value === recordSetId &&
+      selectedRuleSetId.value === ruleSetId
+
     try {
       const next = await calculateAcademicPlan(
         { record_set_id: recordSetId, rule_set_id: ruleSetId },
         controller.signal,
       )
-      if (sequence !== planSequence) {
+      if (!responseStillApplies()) {
         return
       }
       result.value = next
+      resultRecordSetId.value = recordSetId
+      resultRuleSetId.value = ruleSetId
       resultNotUpdated.value = false
       calculationError.value = null
     } catch (caught) {
-      if (sequence !== planSequence) {
+      if (!responseStillApplies()) {
         return
       }
       const error = toApiError(caught)
@@ -233,6 +301,8 @@ export const useAcademicStore = defineStore('academic', () => {
     staleRecordSelection,
     staleRuleSelection,
     result,
+    resultRecordSetId,
+    resultRuleSetId,
     calculating,
     calculationError,
     resultNotUpdated,

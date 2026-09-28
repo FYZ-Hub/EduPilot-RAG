@@ -451,3 +451,262 @@ describe('academic store calculation', () => {
     expect(store.result).toBeNull()
   })
 })
+
+describe('academic store result context', () => {
+  interface DeferredPlan {
+    signals: AbortSignal[]
+    resolve: (value: PlanningResult) => void
+    reject: (reason?: unknown) => void
+  }
+
+  /** 可控的在途规划请求；``honourAbort=false`` 模拟忽略 AbortSignal 的响应。 */
+  function deferredPlan(honourAbort = true): DeferredPlan {
+    const signals: AbortSignal[] = []
+    const resolvers: Array<(value: PlanningResult) => void> = []
+    const rejecters: Array<(reason?: unknown) => void> = []
+    mocks.calculateAcademicPlan.mockImplementation(
+      (_request: unknown, signal?: AbortSignal) =>
+        new Promise<PlanningResult>((resolve, reject) => {
+          if (signal) {
+            signals.push(signal)
+          }
+          resolvers.push(resolve)
+          rejecters.push(reject)
+          if (honourAbort) {
+            signal?.addEventListener('abort', () => {
+              const error = new Error('aborted')
+              error.name = 'AbortError'
+              reject(error)
+            })
+          }
+        }),
+    )
+    return {
+      signals,
+      resolve: (value) => resolvers[resolvers.length - 1](value),
+      reject: (reason) => rejecters[rejecters.length - 1](reason),
+    }
+  }
+
+  async function mountWithOptions(recordIds: string[], ruleIds: string[]) {
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(recordIds, ruleIds))
+    const store = mountStore()
+    await store.loadOptions()
+    return store
+  }
+
+  function select(store: ReturnType<typeof mountStore>, record: string, rule: string): void {
+    store.selectRecordSet(record)
+    store.selectRuleSet(rule)
+  }
+
+  it('aborts the in-flight calculation when the selection changes', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const plan = deferredPlan()
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+    store.selectRecordSet('rs-b')
+
+    expect(plan.signals[0].aborted).toBe(true)
+    expect(store.calculating).toBe(false)
+
+    await pending
+    expect(store.calculationError).toBeNull()
+    expect(store.result).toBeNull()
+  })
+
+  it('discards a late response that ignores the abort signal', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const plan = deferredPlan(false)
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+    store.selectRuleSet('ru-b')
+
+    plan.resolve(planPayload({ completed_credits: 111.0 }))
+    await pending
+
+    expect(store.result).toBeNull()
+    expect(store.resultRecordSetId).toBeNull()
+    expect(store.resultRuleSetId).toBeNull()
+    expect(store.resultNotUpdated).toBe(false)
+  })
+
+  it('discards a late failure that arrives after the selection changed', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const plan = deferredPlan(false)
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+    store.selectRecordSet('rs-b')
+
+    plan.reject(
+      new ApiError('规则集合不可用', {
+        kind: 'http',
+        status: 409,
+        code: 'ACADEMIC_RULE_SET_UNAVAILABLE',
+        requestId: 'req-plan-old',
+      }),
+    )
+    await pending
+
+    expect(store.calculationError).toBeNull()
+    expect(store.result).toBeNull()
+  })
+
+  it('keeps the previous result but marks it as not updated after switching away', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const first = planPayload({ completed_credits: 100.0 })
+    mocks.calculateAcademicPlan.mockResolvedValueOnce(first)
+    await store.calculate()
+
+    expect(store.resultRecordSetId).toBe('rs-a')
+    expect(store.resultRuleSetId).toBe('ru-a')
+
+    store.selectRecordSet('rs-b')
+
+    expect(store.result).toEqual(first)
+    expect(store.resultRecordSetId).toBe('rs-a')
+    expect(store.resultNotUpdated).toBe(true)
+    expect(mocks.calculateAcademicPlan).toHaveBeenCalledTimes(1)
+  })
+
+  it('restores the sync flag when the user selects the result context again without refetching', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const first = planPayload({ completed_credits: 100.0 })
+    mocks.calculateAcademicPlan.mockResolvedValueOnce(first)
+    await store.calculate()
+
+    store.selectRuleSet('ru-b')
+    expect(store.resultNotUpdated).toBe(true)
+
+    store.selectRuleSet('ru-a')
+
+    expect(store.result).toEqual(first)
+    expect(store.resultNotUpdated).toBe(false)
+    expect(mocks.calculateAcademicPlan).toHaveBeenCalledTimes(1)
+  })
+
+  it('clears the selection, flags it stale and invalidates the request when a refresh drops it', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const plan = deferredPlan(false)
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-b'], ['ru-b']))
+    await store.loadOptions()
+
+    expect(store.selectedRecordSetId).toBeNull()
+    expect(store.staleRecordSelection).toBe(true)
+    expect(plan.signals[0].aborted).toBe(true)
+    expect(store.calculating).toBe(false)
+
+    plan.resolve(planPayload())
+    await pending
+
+    expect(store.result).toBeNull()
+  })
+
+  it('does not abort or mark stale when the refresh keeps the same selection', async () => {
+    const store = await mountWithOptions(['rs-a'], ['ru-a'])
+    const plan = deferredPlan()
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+
+    mocks.fetchAcademicOptions.mockResolvedValue(optionsPayload(['rs-a'], ['ru-a']))
+    await store.loadOptions()
+
+    expect(plan.signals[0].aborted).toBe(false)
+    expect(store.calculating).toBe(true)
+    expect(store.resultNotUpdated).toBe(false)
+
+    const payload = planPayload({ completed_credits: 120.0 })
+    plan.resolve(payload)
+    await pending
+
+    expect(store.result).toEqual(payload)
+    expect(store.resultNotUpdated).toBe(false)
+  })
+
+  it('keeps the earlier result and marks it not updated when the new selection fails', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const first = planPayload({ completed_credits: 100.0 })
+    mocks.calculateAcademicPlan.mockResolvedValueOnce(first)
+    await store.calculate()
+
+    store.selectRecordSet('rs-b')
+    mocks.calculateAcademicPlan.mockRejectedValueOnce(
+      new ApiError('规则集合不可用', {
+        kind: 'http',
+        status: 409,
+        code: 'ACADEMIC_RULE_SET_UNAVAILABLE',
+        requestId: 'req-plan-b',
+      }),
+    )
+    await store.calculate()
+
+    expect(store.result).toEqual(first)
+    expect(store.resultRecordSetId).toBe('rs-a')
+    expect(store.resultNotUpdated).toBe(true)
+    expect(store.calculationError?.requestId).toBe('req-plan-b')
+  })
+
+  it('rebinds the result context and clears the stale flags on a successful recalculation', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    mocks.calculateAcademicPlan.mockResolvedValueOnce(planPayload({ completed_credits: 100.0 }))
+    await store.calculate()
+
+    select(store, 'rs-b', 'ru-b')
+    mocks.calculateAcademicPlan.mockRejectedValueOnce(
+      new ApiError('规则集合不可用', {
+        kind: 'http',
+        status: 409,
+        code: 'ACADEMIC_RULE_SET_UNAVAILABLE',
+        requestId: 'req-plan-b',
+      }),
+    )
+    await store.calculate()
+    expect(store.calculationError).not.toBeNull()
+    expect(store.resultNotUpdated).toBe(true)
+
+    const second = planPayload({ completed_credits: 130.0 })
+    mocks.calculateAcademicPlan.mockResolvedValueOnce(second)
+    await store.calculate()
+
+    expect(store.result).toEqual(second)
+    expect(store.resultRecordSetId).toBe('rs-b')
+    expect(store.resultRuleSetId).toBe('ru-b')
+    expect(store.resultNotUpdated).toBe(false)
+    expect(store.calculationError).toBeNull()
+  })
+
+  it('ignores repeated selections of the same id', async () => {
+    const store = await mountWithOptions(['rs-a', 'rs-b'], ['ru-a', 'ru-b'])
+    select(store, 'rs-a', 'ru-a')
+    const plan = deferredPlan()
+
+    const pending = store.calculate()
+    await settleUntil(() => store.calculating)
+
+    store.selectRecordSet('rs-a')
+    store.selectRuleSet('ru-a')
+
+    expect(plan.signals[0].aborted).toBe(false)
+    expect(store.calculating).toBe(true)
+
+    plan.resolve(planPayload())
+    await pending
+    expect(store.result).not.toBeNull()
+  })
+})

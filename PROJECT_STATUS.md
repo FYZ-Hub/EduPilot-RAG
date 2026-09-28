@@ -549,7 +549,7 @@ record 与 rule **独立判断**；纯函数不修改入参 options、不读写�
 
 - 实现前定向测试：退出码 **1**（`Test Files 3 failed (3)`、`Tests no tests`、`Failed to resolve import "./academic"`）。
 - 实现后定向测试（同 3 个文件）→ **`Test Files 3 passed (3)`、`Tests 49 passed (49)`**，退出码 0。
-- `docker compose exec frontend pnpm test` → **28 files / 322 passed**，退出码 0（上一轮 256，净 +66）。
+- `docker compose exec frontend pnpm test` → **28 files / 322 passed**，退出码 0（上一轮 273，净 +49）。
 - `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
 - `docker compose exec backend pytest -q` → 退出码 0（**675 passed, 1 warning**，无回归；本轮未改后端）。
 - `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
@@ -571,6 +571,99 @@ record 与 rule **独立判断**；纯函数不修改入参 options、不读写�
 
 **8C-2 — 学业规划页面布局与结果展示**：读取 URL query 并用本轮纯函数恢复选择、
 选择器与导入对话框、结果卡、类别进度条、缺失课程表格、冲突与证据面板、浏览器视觉验收。
+
+## 阶段 8C-1 独立回归修复轮（BUG-8C1-01 / BUG-8C1-02）
+
+阶段 8 = `in_progress`；8A / 8B-1 / 8B-2 / 8C-1 在本轮修复后仍为 `completed`；
+**8C-2 仍未开始**。本轮只修复「规划结果与当前选择错位」与一处统计口径笔误，
+未修改 `PlanningView.vue`、后端接口、`PRODUCT_SPEC.md` / `UI_SPEC.md`，未新增依赖，
+未真实调用 `POST /api/academic/plan`。
+
+### BUG-8C1-01｜规划结果与当前选择可能错位
+
+- **现象**：`calculate()` 捕获两个 ID 后发起请求，请求期间切换选择既不中止也不作废旧请求；
+  旧请求完成后仍会写入 `result`；Store 没有记录结果属于哪组 ID。
+  于是可能出现「B 的选择配 A 的学分结果」，且切换选择后 `resultNotUpdated` 仍为 `false`。
+- **竞态复现顺序**：
+  1. 选择 `rs-a` / `ru-a` → `calculate()` 发起请求 A（在途，`calculating=true`）；
+  2. 用户改选 `rs-b`（或 `ru-b`）；
+  3. 修复前：A 既未被中止也未被作废，A resolve 后把 A 的结果写入，而当前选择已是 B；
+  4. 修复前：A reject 时把 `calculationError` 展示在 B 的选择下；
+  5. 修复前：已有 A 结果后切到 B，`resultNotUpdated` 仍为 `false`（无上下文可比）。
+- **根因**：`selectRecordSet()` / `selectRuleSet()` / `applyOptions()` 只改选择值；
+  `calculate()` 只比较请求序号，不比较选择上下文；Store 未保存 `result` 的归属。
+- **修复**：
+  1. 新增结果上下文 `resultRecordSetId` / `resultRuleSetId`，成功时与 `result` 同时写入；
+  2. 新增 `hasResultContext()` / `resultMatchesSelection()` / `refreshResultNotUpdated()`：
+     只有存在成功结果且上下文与当前选择不一致时 `resultNotUpdated` 才为 `true`；
+     没有成功结果时恒为 `false`；
+  3. 新增 `invalidateInFlightPlan()`：递增 `planSequence` + `abort()` + `planController = null`
+     + `calculating = false`；
+  4. `calculate()` 写入前必须**同时**满足：请求序号仍是最新、当前 `selectedRecordSetId`
+     等于本次请求的 record ID、当前 `selectedRuleSetId` 等于本次请求的 rule ID；
+     因此**忽略 AbortSignal 并最终 resolve/reject 的 mock** 也无法写入；
+  5. `selectRecordSet()` / `selectRuleSet()`：ID 未变化时立即返回（重复选择不中止请求、不改状态）；
+     变化时 `invalidateInFlightPlan()` + 清除属于旧选择的 `calculationError` + 刷新 `resultNotUpdated`；
+  6. `applyOptions()`：仅当解析出的选择与当前选择不同才执行同样的作废与刷新；
+     选择完全不变时不中止在途计算、也不改动 `resultNotUpdated`；
+  7. `cancel()`：只中止请求，不清空已有成功结果及其上下文，不制造错误。
+- **结果上下文的数据结构**：`result: PlanningResult | null` + `resultRecordSetId: string | null`
+  + `resultRuleSetId: string | null`，三者同写同清，始终一致。
+- **选择变化时的作废规则**（`selectRecordSet` / `selectRuleSet` / `applyOptions` 共用同一处实现）：
+  选择变化 → 中止并作废在途规划请求 → `calculating = false`（被中止的请求不产生 `calculationError`）
+  → 清除旧选择的 `calculationError` → 保留上一份成功结果
+  → `resultNotUpdated = 有成功结果 && 上下文与当前选择不一致`。
+
+### BUG-8C1-02｜8C-1 全量测试统计基线笔误
+
+- 原文 `28 files / 322 passed（上一轮 256，净 +66）`；实测上一轮（8B-2 独立回归修复轮）全量为
+  **273 passed**，8C-1 新增 **49** 项（10 + 21 + 18），已改为 `（上一轮 273，净 +49）`。
+  只修正这处统计基线，未改动任何历史真实总数。
+
+### 新增测试（`frontend/src/stores/academic.spec.ts` · `academic store result context`）
+
+| # | 测试名 | 覆盖 |
+|---|---|---|
+| 1 | `aborts the in-flight calculation when the selection changes` | 计算 A 期间切换到 B 会中止 A |
+| 2 | `discards a late response that ignores the abort signal` | mock 忽略 abort、A 最终 resolve 也不得写入结果 |
+| 3 | `discards a late failure that arrives after the selection changed` | A 的失败在切换到 B 后不得写入 `calculationError` |
+| 4 | `keeps the previous result but marks it as not updated after switching away` | A 成功后切到 B：旧结果保留、`resultNotUpdated=true`、不重新请求 |
+| 5 | `restores the sync flag when the user selects the result context again without refetching` | 切回 A：`resultNotUpdated=false` 且不重新请求 |
+| 6 | `clears the selection, flags it stale and invalidates the request when a refresh drops it` | 刷新后 A 消失：选择清除、stale=true、在途 A 作废、A 结果不得写入 |
+| 7 | `does not abort or mark stale when the refresh keeps the same selection` | 刷新后选择未变：不中止计算、不标记未更新 |
+| 8 | `keeps the earlier result and marks it not updated when the new selection fails` | B 计算失败：保留 A 结果并标记未更新、错误属于当前选择 |
+| 9 | `rebinds the result context and clears the stale flags on a successful recalculation` | B 计算成功：上下文改为 B、`resultNotUpdated=false`、旧错误清除 |
+| 10 | `ignores repeated selections of the same id` | 重复选择同一 ID 不中止请求、不改状态 |
+
+### 修复前失败证据
+
+- 命令：`docker compose exec frontend pnpm vitest run src/stores/academic.spec.ts`
+- 关键输出：`Test Files 1 failed (1)`、`Tests 8 failed | 20 passed (28)`；
+  典型断言：`expected false to be true`（未中止在途请求）、
+  `expected { required_credits: 155, …(7) } to be null`（旧响应把结果写入了新选择下）、
+  `expected ApiError: 规则集合不可用 { … } to be null`（旧失败写入了错误）、
+  `expected undefined to be 'rs-a'`（Store 没有结果上下文）。
+- 退出码：**1**
+
+### 修复后验收
+
+- 定向（3 个 academic spec）→ `Test Files 3 passed (3)`、`Tests 59 passed (59)`，退出码 0。
+- `docker compose exec frontend pnpm test` → **28 files / 332 passed**，退出码 0（上一轮 322，净 +10）。
+- `docker compose exec frontend pnpm build` → `vue-tsc --noEmit` + `vite build` 成功，退出码 0。
+- `docker compose exec backend pytest -q` → 退出码 0；同轮 `docker compose exec backend pytest`
+  （`pytest.ini` 的 `addopts` 已含 `-q`）记录 **675 passed, 1 warning** —— 后端未改动，无回归。
+- `docker compose config --quiet` 退出码 0；`docker compose ps` → backend `Up (healthy)`、frontend `Up`；
+  `GET /api/health` → `documents=ready`、`chat=unconfigured`、`planning=ready`；
+  `GET /api/academic/options`（只读）→ `{"record_sets":[],"rule_sets":[]}`；`git diff --check` 无输出。
+- 前端源码构建进镜像，本轮同样先 `docker compose build frontend` + `docker compose up -d frontend`
+  再执行容器内测试与构建；未新增依赖，`pnpm-lock.yaml` 未变。
+- **未真实调用** `POST /api/academic/plan`：全部竞态用例使用 mock Promise 与 mock API。
+
+### 下一步
+
+**8C-2 — 学业规划页面布局与结果展示**（实施前必须读取 `docs/UI_SPEC.md` 第 7 节与
+`docs/PRODUCT_SPEC.md` 6.4）；页面须直接使用 `resultNotUpdated` / `resultRecordSetId` /
+`resultRuleSetId` 判断结果是否属于当前选择。
 
 ## 阶段 8B-2 结论（RAG 问答页面、证据面板与来源原文抽屉）
 
