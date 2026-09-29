@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import pytest
 from fastapi.testclient import TestClient
 from sqlalchemy import select, update
 
@@ -227,3 +228,82 @@ def test_deleted_source_document_evidence_is_hidden(client: TestClient, context)
     remaining = [item for item in evidence if item["doc_id"] != target["doc_id"]]
     if remaining:
         assert client.get(f"/api/sources/{remaining[0]['chunk_id']}").status_code == 200
+
+
+# ---------------------------------------------------------------------------
+# 反向：被引用但已脱离学业导入资格的 upload 来源仍是统一 404
+# ---------------------------------------------------------------------------
+
+
+def _referenced_upload_chunk(context, *, key: str, **overrides) -> str:
+    """建立「upload 文档 + 真实切片 + 学业表引用」，返回被引用的 chunk_id。"""
+    values = {
+        "source_type": constants.SOURCE_UPLOAD,
+        "source_key": f"probe:referenced:{key}",
+        "file_name": f"probe-{key}.xlsx",
+        "file_type": "xlsx",
+        "mime_type": XLSX_MIME,
+        "sha256": (key.encode().hex() + "0" * 64)[:64],
+        "doc_category": "course_records",
+        "status": constants.STATUS_QUEUED,
+        "current_stage": None,
+        "retrievable": False,
+        "activation_state": None,
+    }
+    values.update(overrides)
+    with context.session_factory() as session:
+        document = Document(**values)
+        session.add(document)
+        session.flush()
+        chunk = DocumentChunk(
+            id=(key.encode().hex() + "0" * 64)[:64],
+            doc_id=document.id,
+            chunk_index=0,
+            text=f"被学业表引用的切片 {key}",
+            locator={"sheet_name": "课程记录", "row_start": 1, "row_end": 1},
+            citation={},
+            parser_version="test",
+            chunker_version="test",
+            chunker_fingerprint="c" * 64,
+        )
+        session.add(chunk)
+        session.flush()
+        session.add(
+            AcademicRecordSet(
+                source_type=constants.SOURCE_UPLOAD,
+                source_key=document.source_key,
+                status=constants.STATUS_READY,
+                display_name=f"probe-{key}",
+                content_hash=(key.encode().hex() + "0" * 64)[:64],
+                source_doc_id=document.id,
+                source_chunk_id=chunk.id,
+            )
+        )
+        session.commit()
+        chunk_id = chunk.id
+    return chunk_id
+
+
+@pytest.mark.parametrize(
+    "overrides",
+    [
+        {"activation_state": constants.ACTIVATION_CANDIDATE},
+        {"activation_state": constants.ACTIVATION_INACTIVE},
+        {"status": constants.STATUS_FAILED},
+    ],
+    ids=["candidate", "inactive", "failed"],
+)
+def test_referenced_disqualified_upload_is_hidden(
+    client: TestClient, context, overrides: dict
+) -> None:
+    """被学业表引用但已脱离学业导入资格的 upload 文档，仍必须统一 404。"""
+    key = "-".join(f"{name}-{value}" for name, value in sorted(overrides.items()))
+    chunk_id = _referenced_upload_chunk(context, key=key, **overrides)
+
+    unknown = _assert_not_found(client.get(f"/api/sources/{'0' * 64}"))
+    hidden = _assert_not_found(client.get(f"/api/sources/{chunk_id}"))
+    assert (hidden["code"], hidden["message"], hidden["details"]) == (
+        unknown["code"],
+        unknown["message"],
+        unknown["details"],
+    )

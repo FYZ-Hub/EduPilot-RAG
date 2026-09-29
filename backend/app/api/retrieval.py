@@ -4,8 +4,10 @@
   对 candidate / inactive / deleted / 未知 chunk 一律返回同一个安全错误，
   不泄漏其存在与否、存储路径或内部状态。
   学业证据切片不进入 RAG 流水线（无 pipeline state、retrievable=false），
-  因此当且仅当「所属文档未删除」且「chunk_id 被学业来源表显式引用」时允许读取，
-  返回字段与可检索来源完全一致；其余未知 / 未引用 / 已删除来源仍是同一个安全错误。
+  因此当且仅当「学业导入拥有的 upload 文档」且「保持导入时的非 RAG 状态」且
+  「文档未删除」且「chunk_id 被学业来源表显式引用」时允许读取，
+  返回字段与可检索来源完全一致；其余未知 / 未引用 / 已删除 / candidate / inactive /
+  failed 来源仍是同一个安全错误。
 - ``GET /retrieval/options``：只从当前 ready 且 retrievable 的文档聚合，
   去重、稳定排序、空值不返回；没有数据时返回空数组。
 本阶段不提供公共调试搜索接口，混合检索由测试直接驱动。
@@ -21,6 +23,7 @@ from fastapi import APIRouter, Depends
 from sqlalchemy import text
 from sqlalchemy.orm import Session
 
+from app import constants
 from app.api.deps import AppContext, get_context, get_session
 from app.core.errors import SOURCE_NOT_FOUND, ApiError
 from app.documents.categories import category_label
@@ -33,8 +36,10 @@ router = APIRouter(tags=["retrieval"])
 _CHUNK_ID_RE = re.compile(r"^[0-9a-f]{64}$")
 
 # 学业证据切片的兜底读取：只在 RAG 资格路径未命中时使用。
-# 条件是「所属文档未删除」且「chunk_id 被学业来源表显式引用」；
-# 未知、未引用、已删除以及原有 candidate / inactive 来源都不会命中。
+# 资格必须是「学业导入拥有的 upload 文档」，即导入写库时的非 RAG 状态：
+# source_type=upload、status=queued、current_stage IS NULL、retrievable=0、
+# activation_state IS NULL，且文档未删除；在此基础上 chunk_id 还必须被学业来源表显式引用。
+# candidate / inactive / failed、其它来源、未知、未引用与已删除都不会命中。
 _REFERENCED_EVIDENCE_SQL = text(
     """
     SELECT c.id, c.text, c.locator,
@@ -43,6 +48,11 @@ _REFERENCED_EVIDENCE_SQL = text(
     FROM document_chunks c
     JOIN documents d ON d.id = c.doc_id
     WHERE c.id = :chunk_id
+      AND d.source_type = :evidence_source_type
+      AND d.status = :evidence_status
+      AND d.current_stage IS NULL
+      AND d.retrievable = 0
+      AND d.activation_state IS NULL
       AND d.deleted_at IS NULL
       AND (
         EXISTS (SELECT 1 FROM academic_record_sets r WHERE r.source_chunk_id = c.id)
@@ -129,8 +139,15 @@ def read_source(
             locator=chunk.locator,
         )
 
-    # 学业证据兜底：只放行被学业来源表显式引用且所属文档未删除的切片。
-    row = session.execute(_REFERENCED_EVIDENCE_SQL, {"chunk_id": chunk_id}).first()
+    # 学业证据兜底：只放行「学业导入拥有、未删除、且被学业来源表显式引用」的切片。
+    row = session.execute(
+        _REFERENCED_EVIDENCE_SQL,
+        {
+            "chunk_id": chunk_id,
+            "evidence_source_type": constants.SOURCE_UPLOAD,
+            "evidence_status": constants.STATUS_QUEUED,
+        },
+    ).first()
     if row is None:
         raise _not_found()
 
