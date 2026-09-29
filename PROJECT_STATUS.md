@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 9 进行中（9A 离线检索评测基线已完成）；阶段 8 已完成；阶段 10 未开始**
-- 下一阶段：**阶段 9B（引用支持率 / 拒答正确率 / 学分正确率 / 安全评测）**；阶段 9 整体仍为 `in_progress`，**不得标记 `completed`**
+- 当前阶段：**阶段 9 进行中（9A 离线检索评测 completed；9B 离线问答与学业评测诊断为 incomplete/deferred）；阶段 8 已完成；阶段 10 未开始**
+- 下一阶段：**阶段 9B 收尾**——需先提供显式语义 profile、完整配置并完成一次真实调用，才能评测引用支持率 / 拒答正确率 / 注入抵抗；阶段 9 整体仍为 `in_progress`，**不得标记 `completed`**
 - 最近更新：2026-09-29
 
 ## 阶段状态
@@ -21,6 +21,71 @@
 | 8 | Vue 核心页面 | completed |
 | 9 | RAG 评测与安全测试 | in_progress |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 9B 结论（离线问答与学业评测诊断：incomplete/deferred）
+
+结论：**阶段 9 = `in_progress`（不变），9A = `completed`（不变），9B = `incomplete/deferred`**。
+本轮**只提交离线诊断基础设施**，**不接入真实模型、不宣称质量通过**。
+
+### 为什么 9B 不能判定通过
+
+- 本轮 Provider 组合为 `fake` embedding / `fake` reranker / `fake` LLM，**完全离线**。
+- Fake LLM 的回答完全由传入证据文本拼装（不判断证据是否支持结论、无指令遵循/抵抗能力），
+  属**非语义测试替身**；非语义 embedding 对任意问题都返回近邻，使「无证据」场景无法自然产生。
+- 因此 **引用语义支持率、拒答正确率、注入抵抗三项正式质量指标在当前环境不可评测**，
+  一律为 `null` 且标记 `deferred`；只有**确定性**的学分规划指标具备门禁资格。
+
+### 两层门禁与退出码
+
+- **deterministic gate**：`planning_correctness` → `passed = true`。
+- **stage completion gate**：必需指标 = planning / citation_support_rate / refusal_correctness / injection_resistance；
+  状态 **`incomplete`**、`passed = false`、顶层 `gate.passed = false`、`stage9b_passed = false`。
+- **退出码 2** 的语义是「存在必需指标因 Provider 无语义能力而 deferred」——
+  **既不是工具执行失败，也不是质量通过**。
+
+### 最终评测（run id `20260929-132945`，schema `rag-qa-eval/2.0`，隔离目录 `.tmp/eval-qa/20260929-132945/`）
+
+| 指标 | 值 | 性质 |
+|---|---|---|
+| planning_correctness | **1.0000** | 正式（确定性门禁，通过） |
+| citation_contract_rate | **1.0000** | 结构实测（引用接线完整） |
+| citation_source_hit_rate | **0.5610** | 结构实测（引用来源命中期望来源） |
+| citation_support_rate | **null** | 正式质量，`deferred`（未评测） |
+| refusal_observed_rate | 0.0000 | 观测诊断（不是质量结论） |
+| refusal_correctness | **null** | 正式质量，`deferred`（未评测） |
+| injection_observed_rate | 0.0000 | 观测诊断（不是质量结论） |
+| injection_resistance | **null** | 正式质量，`deferred`（未评测） |
+
+- 样本：`demo/ground_truth.jsonl` 共 55 条全部评分（planning 6 / 拒答 5 / 注入 3 / 引用 41）。
+- 观测失败阶段分布（仅用于定位）：`citation_source_miss` 18、`refusal_not_triggered` 5、`llm_safety_semantics` 3。
+- 报告同时写出：「deterministic 子门禁：planning_correctness 通过」「阶段 9B 整体 incomplete/deferred」
+  「本报告不得被解读为『阶段 9B 通过』」。
+
+### 本轮验证
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `docker compose build backend frontend` | 0 | 两镜像构建成功 |
+| `docker compose up -d --force-recreate` | 0 | backend healthy、frontend 200 |
+| `docker compose exec backend pytest tests/test_eval_qa.py -q` | 0 | **12 passed** |
+| `scripts/run-rag-qa-eval.ps1`（完整 9B 诊断，一次） | **2** | 按设计：必需语义指标 deferred（非失败、非通过） |
+| `docker compose exec backend pytest -q` | 0 | **732 passed** |
+| `docker compose exec frontend pnpm test` | 0 | **38 files / 449 passed** |
+| `docker compose exec frontend pnpm build` | 0 | `vue-tsc` + `vite build` 成功 |
+| `docker compose config --quiet` | 0 | 默认编排有效 |
+| `docker compose -f docker-compose.yml -f docker-compose.e2e.yml config --quiet` | 0 | E2E overlay 有效 |
+| `git diff --check` | 0 | 无空白错误 |
+
+### 完成 9B 的前置条件（阻塞项）
+
+必须同时满足，缺一不可：
+
+1. **显式选择语义评测 profile**（不能因 provider 名称非 `fake` 自动获得资格）；
+2. **配置完整**（真实 LLM 连接与凭据、对应模型名，以及具备相关性语义的 embedding / reranker）；
+3. **完成一次真实调用并成功**（资格校验要求 `verified_call = true`）。
+
+在此之前，9B 只能给出「确定性学分规划通过 + 结构性诊断」，
+**不得**把 9B 标记为 completed，也**不得**把退出码 2 解读为质量通过。
 
 ## 阶段 9A 结论（离线 RAG 检索评测基线）
 
