@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 已完成（8A、8B-1、8B-2、8C-1、8C-2 与 Playwright 端到端验收全部通过）；阶段 9、10 未开始**
-- 下一阶段：**阶段 9 RAG 评测与安全测试**（未开始，仍为 `not_started`）
+- 当前阶段：**阶段 9 进行中（9A 离线检索评测基线已完成）；阶段 8 已完成；阶段 10 未开始**
+- 下一阶段：**阶段 9B（引用支持率 / 拒答正确率 / 学分正确率 / 安全评测）**；阶段 9 整体仍为 `in_progress`，**不得标记 `completed`**
 - 最近更新：2026-09-29
 
 ## 阶段状态
@@ -19,8 +19,59 @@
 | 6 | SSE 问答与引用 | completed |
 | 7 | 确定性学分规则引擎 | completed |
 | 8 | Vue 核心页面 | completed |
-| 9 | RAG 评测与安全测试 | not_started |
+| 9 | RAG 评测与安全测试 | in_progress |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 9A 结论（离线 RAG 检索评测基线）
+
+结论：**阶段 9 = `in_progress`，9A = `completed`**。本阶段只交付离线**检索质量基线**
+（Recall@k / MRR / P50-P95），**不涉及**生成质量、引用支持率、拒答、学分与安全评测。
+
+### 评测 profile 与门禁口径
+
+- `offline_fake`：真实解析 / SQLite / Chroma / FTS5 / Dense / Keyword / RRF + `fake-deterministic` Reranker。
+- Fake Reranker 分数由 `sha256(query ⊕ text)` 派生，**不具备相关性语义**，只能用于链路与契约诊断；因此 **`offline_fake` 的质量门禁固定为 `fusion Recall@5`**。
+- final Fake-rerank `Recall@5` / `MRR` 必须继续记录，但标记为 `non_semantic_diagnostic`，**不得据此宣称生产重排质量通过**。
+- 具有相关性语义的 provider（`crossencoder-sigmoid` / `api-relevance-score`）对应 profile `online_rerank`，门禁为 final `Recall@5`。
+- 报告 schema 升级为 **`rag-retrieval-eval/2.0`**，新增顶层 `gate` 对象（profile / metric / value / threshold / passed / reason），JSON / Markdown / CLI 摘要 / 退出码同源一致。
+
+### 真实指标（run id `20260929-123240`，隔离目录 `.tmp/eval/20260929-123240/`）
+
+| 层 | 指标 | 值 | 语义 |
+|---|---|---|---|
+| 候选（RRF top-20） | candidate Recall@20 | **1.0000** | diagnostic |
+| 融合（RRF top-5） | fusion Recall@5 | **0.8740** | gate |
+| 融合 | fusion MRR | 0.5965 | gate |
+| 最终（fake-deterministic） | final Recall@5 | **0.5407** | non_semantic_diagnostic |
+| 最终（fake-deterministic） | final MRR | 0.4073 | non_semantic_diagnostic |
+
+- 门禁对象：`{profile: offline_fake, metric: fusion_recall_at_k, value: 0.874, threshold: 0.85, passed: true}`；CLI 退出码 0。
+- 检索时延：P50 = 17.72 ms、P95 = 59.89 ms（n = 41）。
+- 样本口径：`demo/ground_truth.jsonl` 共 55 条；纳入正例 41；排除 14（`should_refuse` 8 + `excluded_category` 6）。
+- 失败来源分类（共 25 个，22 个用例）：`rerank_demoted` **18**、`fusion_cutoff` **7**；`parse_or_chunk` / `recall` / `fusion` 均为 0（候选层无缺陷）。
+- 全部期望来源阶段分布（54 个实例）：`retained_top5` 28、`rerank_demoted` 18、`fusion_cutoff` 7、`rerank_promoted` 1。
+
+### 本轮验证
+
+| 命令 | 退出码 | 结果 |
+|---|---|---|
+| `scripts/run-rag-eval.ps1`（完整离线评测，一次） | 0 | gate 通过（fusion Recall@5 = 0.874 ≥ 0.85） |
+| `docker compose run --rm --no-deps backend pytest -q` | 0 | **720 passed**（含 30 项 9A 新增测试） |
+| `docker compose exec frontend pnpm test` | 0 | Vitest **38 files / 449 passed** |
+| `docker compose exec frontend pnpm build` | 0 | `vue-tsc --noEmit` + `vite build` 成功 |
+| `docker compose config --quiet` | 0 | 默认编排配置有效 |
+| `docker compose -f docker-compose.yml -f docker-compose.e2e.yml config --quiet` | 0 | E2E overlay 配置有效 |
+| `git diff --check` | 0 | 无空白错误 |
+
+### 本轮未执行（阶段 9 不得标记 `completed`）
+
+- **真实 Local / API Reranker 的质量评测**：需真实权重或外部 API，本轮未运行，因此生产重排质量**未被评测**；
+- **引用支持答案比例**；
+- **拒答正确率**；
+- **模型学分案例正确率**；
+- **安全评测**（提示注入 / 不可信文档指令）。
+
+以上均属于 9B 或更后阶段，本轮不得声称已通过。
 
 ## 阶段 8 最终收尾结论（Playwright 端到端验收通过）
 
