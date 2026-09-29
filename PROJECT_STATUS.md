@@ -2,9 +2,9 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 8 进行中（8A、8B-1、8B-2、8C-1、8C-2 已完成，8B / 8C 整体完成；阶段 8 剩余端到端验收，阶段 9、10 未开始）**
-- 下一阶段：**阶段 8 收尾（Playwright 端到端与三档视口验收）→ 阶段 9 RAG 评测与安全测试**（8C-2 已交付；`docs/IMPLEMENTATION_PLAN.md` 阶段 8 明确要求 `pnpm exec playwright test`）
-- 最近更新：2026-09-28
+- 当前阶段：**阶段 8 已完成（8A、8B-1、8B-2、8C-1、8C-2 与 Playwright 端到端验收全部通过）；阶段 9、10 未开始**
+- 下一阶段：**阶段 9 RAG 评测与安全测试**（未开始，仍为 `not_started`）
+- 最近更新：2026-09-29
 
 ## 阶段状态
 
@@ -18,9 +18,45 @@
 | 5 | Reranker | completed |
 | 6 | SSE 问答与引用 | completed |
 | 7 | 确定性学分规则引擎 | completed |
-| 8 | Vue 核心页面 | in_progress |
+| 8 | Vue 核心页面 | completed |
 | 9 | RAG 评测与安全测试 | not_started |
 | 10 | 一键启动与复现 | not_started |
+
+## 阶段 8 最终收尾结论（Playwright 端到端验收通过）
+
+结论：**阶段 8 = `completed`**；8A / 8B-1 / 8B-2 / 8C-1 / 8C-2 与端到端验收全部通过；阶段 9 保持 `not_started`。
+
+### 最终全量回归（同一轮按序执行，任一失败即停止）
+
+| 步骤 | 命令 | 退出码 | 真实结果 |
+|---|---|---|---|
+| 1 | `docker compose build backend frontend` | 0 | 两个镜像均成功构建 |
+| 2 | `docker compose up -d --force-recreate` | 0 | `backend`（healthy）、`frontend`（HTTP 200）就绪 |
+| 3 | `docker compose exec frontend pnpm test` | 0 | Vitest **38 files / 449 passed** |
+| 4 | `docker compose exec frontend pnpm build` | 0 | `vue-tsc --noEmit` + `vite build` 成功（chunk >500kB 仅提示） |
+| 5 | `docker compose exec backend pytest -q` | 0 | **690 passed / 44 files**，1 个 starlette `DeprecationWarning` |
+| 6 | `docker compose config --quiet` | 0 | 默认编排配置有效 |
+| 7 | `docker compose -f docker-compose.yml -f docker-compose.e2e.yml config --quiet` | 0 | E2E overlay 配置有效 |
+| 8 | `scripts/run-playwright-e2e.ps1 -Mode Docker -PlaywrightBaseImage …v1.49.1-jammy` | 0 | **8 passed / 0 failed / 0 skipped**，`retries=0` |
+
+### E2E 验收（run id `20260929-120810`）
+
+- 隔离：每轮唯一目录 `.tmp/e2e/20260929-120810/`（`data` / `test-results` / `snapshots` / `logs` 全部隔离），默认 `./data` 卷不参与；E2E backend 断言 **fake embedding / fake reranker**，无任何真实 LLM 与外部 API 调用。
+- 场景 1–8 全绿：知识库加载与刷新恢复、重复加载幂等、三格式上传与定位预览、正常问答流式与引用原文、无依据拒答、学业规划计算与证据、离线/超时/单文件失败降级、三档视口与键盘与 200% 缩放；JSON report `stats = { expected: 8, skipped: 0, unexpected: 0, flaky: 0 }`。
+- 三档视口（`scrollWidth = clientWidth`，无整页横向溢出，`/knowledge`、`/chat`、`/planning` 三页各一）：
+  - `390×844`：`390/390`；`1024×768`：`1024/1024`；`1440×900`：`1440/1440`。
+- 引用操作真实 bbox（≥40×40；移动端 ≥44 高）：
+  - 桌面 `1440×900`：`ep-evidence-card__select {x:1065, y:241, w:326, h:40}`、`ep-evidence-card__open {x:1065, y:532.578125, w:64, h:40}`。
+  - 移动 `390×844`：`ep-evidence-card__select {x:33, y:253, w:324, h:44}`、`ep-evidence-card__open {x:33, y:548.578125, w:64, h:44}`。
+- 200% 等价视口：`720×450`，`scrollWidth = clientWidth = 720`，`ep-composer__input` 可见。
+- 场景 7 console/pageerror：`console.error` 共 4 条且全部命中本地白名单（2× `net::ERR_FAILED`、1× `503`、1× 损坏文件上传 `400`），`pageerror = []`；损坏文件 400 响应 `code=DOCUMENT_CONTENT_TYPE_MISMATCH` 且 `request_id` 非空。
+- 快照恢复：`restore: down=0 up=0 health=True web=True`（恢复退出码 0），`snapshotsEqual=True`（恢复前后默认环境摘要逐字段一致）。
+- JSON report `playwright-report.json` 落盘于本轮 `test-results/`，其中场景 7 与场景 8 的两个 body attachment 永久留存。
+
+### 证据留存说明
+
+- 本轮仅改 `frontend/playwright.config.ts` 追加 JSON reporter（`outputFile = ${OUTPUT_DIR}/playwright-report.json`），保留原 list reporter；未改 trace/screenshot/video、retries、workers 及任何测试断言，未改生产逻辑。
+- E2E 全部走真实 frontend + 真实 backend + SQLite + Chroma + FTS5；唯一网络模拟是场景 7 的主动故障注入（health abort、chat 503、损坏文件 400），fake 仅用于 embedding / reranker provider。
 
 ## 阶段 8 E2E 前置独立修复轮（BUG-8-E2E-02：Chroma 组合过滤导致问答流中断）
 

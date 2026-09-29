@@ -1,0 +1,5 @@
+This is an intentionally invalid upload fixture used by the stage 8 Playwright
+suite (scenario 7). It carries a .pdf extension but is not a PDF container, so
+the backend must reject it after real extension/MIME/header validation.
+
+Only fictional, non-personal content is used here.

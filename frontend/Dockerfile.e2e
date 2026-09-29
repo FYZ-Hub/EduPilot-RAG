@@ -1,0 +1,27 @@
+# 阶段 8 端到端验收专用镜像（默认 frontend/Dockerfile 保持轻量、完全不变）。
+#
+# - 基础镜像可覆盖：默认是官方 MCR，本机/CI 可通过构建参数换用镜像加速源；
+#   无论用哪来源，tag 都必须与 package.json / lockfile 中精确锁定的
+#   ``@playwright/test@1.49.1`` 逐字一致，禁止 latest / ^ / ~。
+# - 官方镜像自带 Chromium 与系统依赖（PLAYWRIGHT_BROWSERS_PATH=/ms-playwright），
+#   因此构建期禁止再下载浏览器：显式设置 PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1。
+# - Playwright 已进入 package.json 与 pnpm-lock.yaml，构建期不得临时改动依赖树。
+ARG PLAYWRIGHT_BASE_IMAGE=mcr.microsoft.com/playwright:v1.49.1-jammy
+FROM ${PLAYWRIGHT_BASE_IMAGE}
+
+USER root
+
+WORKDIR /app
+
+ENV PLAYWRIGHT_SKIP_BROWSER_DOWNLOAD=1
+
+RUN corepack enable && corepack prepare pnpm@9.12.3 --activate
+
+COPY package.json pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
+
+COPY . .
+
+EXPOSE 5173
+
+CMD ["pnpm", "dev"]

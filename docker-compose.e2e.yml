@@ -1,0 +1,59 @@
+# 阶段 8 端到端验收的隔离 overlay（只覆盖既有 backend / frontend，不新增长期服务）。
+#
+# 使用方式（必须在同一命令里同时指定两个文件）：
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml up -d --force-recreate
+#   docker compose -f docker-compose.yml -f docker-compose.e2e.yml exec frontend pnpm exec playwright test
+#
+# 隔离要点：
+# - 写入型 E2E 只使用 ./.tmp/e2e/current 作为数据目录（默认 ./data 完全不被读写）；
+# - DATABASE_URL / CHROMA_PATH / UPLOAD_PATH / MODEL_CACHE_PATH 全部指向 /app/e2e-data；
+# - APP_ENV=e2e、Embedding / Reranker / LLM 全部使用 fake，不配置任何 Base URL 或 API Key；
+# - ./demo 仍然只读挂载（语料与 ground truth 不被修改）；
+# - 浏览器运行在 frontend 容器内，因此 VITE_API_BASE_URL 必须使用 Docker 服务名 backend。
+services:
+  backend:
+    environment:
+      APP_ENV: e2e
+      CORS_ORIGINS: http://localhost:5173
+      DATABASE_URL: sqlite:////app/e2e-data/sqlite/app.db
+      CHROMA_PATH: /app/e2e-data/chroma
+      UPLOAD_PATH: /app/e2e-data/uploads
+      MODEL_CACHE_PATH: /app/e2e-data/models
+      DEMO_DATASET_ENABLED: "true"
+      DEMO_DATASET_PATH: /app/demo
+      DEMO_DATASET_VERSION: "2026.1"
+      DEMO_JOB_POLL_SECONDS: "1"
+      DEMO_JOB_LEASE_SECONDS: "60"
+      EMBEDDING_PROVIDER: fake
+      EMBEDDING_MODEL: fake-embedding
+      EMBEDDING_DEVICE: cpu
+      RERANK_PROVIDER: fake
+      RERANK_MODEL: fake-reranker
+      RERANK_DEVICE: cpu
+      LLM_PROVIDER: fake
+      LLM_BASE_URL: ""
+      LLM_API_KEY: ""
+      LLM_MODEL: ""
+      RETRIEVAL_SCORE_THRESHOLD: ""
+    volumes:
+      - ./demo:/app/demo:ro
+      # 每轮使用新的 .tmp/e2e/<run-id>；缺省值仅用于手工调试，脚本会显式覆盖
+      - ${E2E_DATA_DIR:-./.tmp/e2e/current}:/app/e2e-data
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.e2e
+      args:
+        # 官方 MCR 是默认值；国内加速源只能通过环境变量覆盖，不得写死
+        PLAYWRIGHT_BASE_IMAGE: ${PLAYWRIGHT_BASE_IMAGE:-mcr.microsoft.com/playwright:v1.49.1-jammy}
+    image: campus-rag-frontend-e2e:0.1.0
+    environment:
+      VITE_API_BASE_URL: http://backend:8000/api
+      # Playwright 的 trace / 截图 / 视频 / 报告只能落到这个隔离目录
+      PLAYWRIGHT_OUTPUT_DIR: /app/test-results
+    volumes:
+      # 只读提供固定的虚构语料，供上传与学业导入场景通过 UI 选择文件
+      - ./demo:/app/e2e-fixtures:ro
+      # 每轮测试产物目录（宿主机目录由 E2E_RESULTS_DIR 控制）
+      - ${E2E_RESULTS_DIR:-./.tmp/e2e/current/test-results}:/app/test-results
