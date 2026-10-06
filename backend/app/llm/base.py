@@ -23,10 +23,15 @@ FAKE_LLM_REVISION = "1.0.0"
 API_LLM_REVISION = "api"
 
 # 实现 / 提示词 / 响应结构版本：变化即改变 LLM 指纹（仅用于安全诊断）
-LLM_IMPLEMENTATION_VERSION = "1.0.0"
-PROMPT_VERSION = "grounded-answer-v1"
+LLM_IMPLEMENTATION_VERSION = "1.1.0"
+# v6：收紧模型生成阶段的回答/拒答契约——outcome↔reason_code 严格绑定、覆盖规则、
+#     引用克制；服务端确定性早退 reason 不再出现在模型规则或示例中。
+PROMPT_VERSION = "grounded-answer-v6"
 REWRITE_PROMPT_VERSION = "query-rewrite-v1"
-RESPONSE_SCHEMA_VERSION = "grounded-completion-v1"
+# 响应结构版本（v2）：outcome 与 reason_code 严格绑定——answered→null、
+# refused→insufficient_evidence、conflict→version_conflict；四种服务端确定性早退
+# reason 不属于模型输出契约。变化即改变 LLM 指纹（仅诊断用，不进入文档流水线指纹）。
+RESPONSE_SCHEMA_VERSION = "grounded-completion-v2"
 
 
 @dataclass(frozen=True)

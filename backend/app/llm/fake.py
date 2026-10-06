@@ -130,7 +130,7 @@ class FakeLLMProvider(LLMProvider):
         if not evidence:
             payload = {
                 "outcome": constants.CHAT_OUTCOME_REFUSED,
-                "reason_code": constants.REASON_NO_EVIDENCE,
+                "reason_code": constants.REASON_MODEL_DECLINED,
                 "answer": "没有可用的证据。",
                 "citation_indices": [],
             }

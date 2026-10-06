@@ -89,7 +89,7 @@ class Settings(BaseSettings):
     chunk_overlap_chars: int = 100
     dense_top_k: int = 12
     keyword_top_k: int = 12
-    rerank_top_k: int = 6
+    rerank_top_k: int = 10
     retrieval_score_threshold: float | None = None
 
     @field_validator("retrieval_score_threshold", mode="before")

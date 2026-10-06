@@ -30,7 +30,16 @@ LOCAL_RERANK_MODEL_REVISION = "953dc6f6f85a1b2dbfca4c34a2796e7dde08d41e"
 API_RERANK_REVISION = "api"
 
 # 实现/结构版本与分数语义：变化即改变 reranker fingerprint（仅诊断用途）
-RERANK_IMPLEMENTATION_VERSION = "1.0.0"
+# 1.2.0：候选文本改为「原正文 + 一行白名单 JSON 元数据」（见 search.reranking）。
+# 1.3.0：ApiReranker 改为按实例懒加载并复用单个 httpx.Client（连接池复用）；
+#        payload / headers / timeout / 标签 / 分数语义不变。
+# 1.4.0 / 1.4.1：曾尝试「重排后精确课程代码硬分区」；实测收益为负（期望 locator 新增 3、丢失 3、
+#        净值 0，且正式 support 下降），已撤回。
+# 1.4.2：撤回重排后的课程代码硬覆盖，恢复严格按外部 Reranker 排序取前 K 条；课程代码仍通过
+#        候选白名单元数据（format_rerank_candidate）交由 Reranker 结合完整问题自行判断相关性。
+# 1.5.0：仅把最终上下文硬上限与默认值 6→10（证据覆盖更完整）；外部排序、候选数（20）、
+#        Provider 调用次数与分数语义均不变。
+RERANK_IMPLEMENTATION_VERSION = "1.5.0"
 RERANK_SCORE_KIND_FAKE = "fake-deterministic"
 RERANK_SCORE_KIND_LOCAL = "crossencoder-sigmoid"
 RERANK_SCORE_KIND_API = "api-relevance-score"

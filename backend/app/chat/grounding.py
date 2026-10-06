@@ -6,6 +6,13 @@
 
 任何未知、越界、重复、缺失或与正文不一致的引用都判为 ``MODEL_RESPONSE_INVALID``，
 并且在**发送任何 token 之前**完成全部校验。
+
+``outcome`` 与 ``reason_code`` 严格绑定：``answered``→``null``、``refused``→
+``insufficient_evidence``、``conflict``→``version_conflict``；四种服务端确定性早退
+reason（``no_evidence`` / ``below_score_threshold`` / ``score_unavailable`` /
+``planning_unavailable``）**不允许**出现在模型输出中——服务端在调用回答 LLM 前已保证
+「结果非空、分数可用且超过阈值」。不符合绑定的一律归为稳定白名单 reason
+``reason_code_outcome_mismatch``，绝不回显模型返回的原文。
 """
 
 from __future__ import annotations
@@ -18,6 +25,40 @@ from app import constants
 from app.core.errors import MODEL_RESPONSE_INVALID, ApiError
 
 _MARKER = re.compile(r"\[(\d{1,3})\]")
+
+# ``MODEL_RESPONSE_INVALID`` 的全部稳定细分原因白名单（唯一权威来源）。
+# - 这是**唯一**允许进入 SSE error ``reason`` 与评测安全字段 ``error_reason`` 的取值集合；
+# - 任何不在此集合内的值都不得外发，评测侧一律归一为 ``unknown``/``null``；
+# - 校验规则本身不因本白名单而放宽或收紧（仅用于安全外发与诊断归一）。
+GROUNDING_REASONS = (
+    "not_json",
+    "not_object",
+    "bad_outcome",
+    "bad_reason_code",
+    "conflict_without_server_evidence",
+    "reason_code_outcome_mismatch",
+    "empty_answer",
+    "answer_too_long",
+    "bad_citation_list",
+    "citation_out_of_range",
+    "duplicate_citation",
+    "refused_with_citations",
+    "missing_citation",
+    "missing_required_citation",
+    "citation_marker_mismatch",
+)
+
+# 模型侧 outcome ↔ reason_code 的**严格绑定**：
+# - 服务端在调用回答 LLM 前已保证「结果非空、分数可用且超过阈值」，
+#   因此 no_evidence / below_score_threshold / score_unavailable / planning_unavailable
+#   这四种**服务端确定性早退** reason 不允许出现在模型输出中；
+# - answered 必须 null、refused 必须 insufficient_evidence、conflict 必须 version_conflict；
+# - 任何不符合的取值都归为稳定白名单 reason ``reason_code_outcome_mismatch``（绝不回显正文）。
+_MODEL_REASON_BY_OUTCOME = {
+    constants.CHAT_OUTCOME_ANSWERED: None,
+    constants.CHAT_OUTCOME_REFUSED: constants.REASON_MODEL_DECLINED,
+    constants.CHAT_OUTCOME_CONFLICT: constants.REASON_VERSION_CONFLICT,
+}
 
 
 @dataclass(frozen=True)
@@ -80,9 +121,10 @@ def parse_grounded_completion(
     if outcome == constants.CHAT_OUTCOME_CONFLICT and not required_indices:
         raise _invalid("conflict_without_server_evidence")
 
-    # answered 不允许携带 reason_code（拒答/冲突才需要解释原因）
-    if outcome == constants.CHAT_OUTCOME_ANSWERED and reason_code is not None:
-        raise _invalid("answered_with_reason_code")
+    # outcome 与 reason_code 的严格绑定（answered→null / refused→insufficient_evidence /
+    # conflict→version_conflict）；不符合时用稳定白名单 reason，绝不回显模型正文
+    if reason_code != _MODEL_REASON_BY_OUTCOME[outcome]:
+        raise _invalid("reason_code_outcome_mismatch")
 
     answer = payload.get("answer")
     if not isinstance(answer, str) or not answer.strip():
@@ -142,6 +184,7 @@ def remap_citations(completion: GroundedCompletion) -> tuple[str, tuple[int, ...
 
 
 __all__ = [
+    "GROUNDING_REASONS",
     "GroundedCompletion",
     "parse_grounded_completion",
     "remap_citations",

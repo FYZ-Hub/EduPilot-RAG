@@ -213,6 +213,22 @@ def test_sse_framing_is_raw_utf8_single_line_json(ingest_demo, client) -> None:
 
     done = events[-1][1]
     assert response.headers[REQUEST_ID_HEADER] == done["request_id"]
+    # 终止帧字段集合完全固定：新增的冲突诊断 trace 绝不进入生产 SSE
+    assert set(done) == {"request_id", "outcome", "reason_code", "citation_count"}
+    body_text = body.decode("utf-8")
+    for leaked in (
+        "conflict_trace",
+        "signal_types",
+        "forced_conflict",
+        "question_field_exact_match",
+        "row_slot_intent",
+        "field_count",
+        "field_digest",
+        "conflict_field_digest",
+        "cross_version_intent",
+        "suppression_reason",
+    ):
+        assert leaked not in body_text, f"诊断 trace 不得进入生产 SSE：{leaked}"
 
     citations = [payload for name, payload in events if name == "citation"]
     assert done["citation_count"] == len(citations)

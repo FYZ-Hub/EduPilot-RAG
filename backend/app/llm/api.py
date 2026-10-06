@@ -2,6 +2,8 @@
 
 - 使用现有 ``httpx``（异步），**不引入 OpenAI SDK**；
 - ``POST {LLM_BASE_URL.rstrip('/')}/chat/completions``，Bearer 认证，显式 timeout；
+- 请求固定 ``temperature=0.0`` 贪婪采样（implementation 1.1.0），消除服务商默认
+  随机采样导致相同证据仍产生不同结果；不发送 seed、不重试、不二次调用；
 - Base URL / model / API Key 缺一即安全失败（固定 reason，不回显配置值）；
 - 构造、健康检查与 ``configured`` 判断**都不联网、不加载模型**；
 - **隐私边界**：外发前用共享的 ``app.core.privacy.scrub`` 清洗 user 文本副本，
@@ -86,6 +88,8 @@ class OpenAiCompatibleLLMProvider(LLMProvider):
                 {"role": "user", "content": scrub(user)},
             ],
             "stream": False,
+            # 固定贪婪采样：消除服务商默认随机采样带来的跨次不一致
+            "temperature": 0.0,
         }
 
         try:

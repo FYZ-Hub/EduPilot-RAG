@@ -322,17 +322,17 @@ def test_privacy_version_does_not_enter_document_pipeline_fingerprint(tmp_path) 
     assert stage_fingerprints(base) == stage_fingerprints(rerank_changed)
 
 
-# --- Top 6 硬上限 ------------------------------------------------------------
+# --- Top 10 硬上限 -----------------------------------------------------------
 
 
-def test_rerank_output_never_exceeds_six_with_large_top_k(ingest_demo, search) -> None:
+def test_rerank_output_never_exceeds_ten_with_large_top_k(ingest_demo, search) -> None:
     ingest_demo()
     results, diagnostics = search.rerank("学分认定", top_k=999)
-    assert len(results) <= 6
+    assert len(results) <= 10
     assert diagnostics.reranked_candidates == len(results)
 
 
-def test_rerank_allows_fewer_than_six(ingest_demo, search) -> None:
+def test_rerank_allows_fewer_than_ten(ingest_demo, search) -> None:
     ingest_demo()
     results, _diagnostics = search.rerank("学分认定", top_k=3)
     assert 0 < len(results) <= 3
@@ -360,7 +360,7 @@ def test_configured_top_k_cannot_exceed_hard_cap(context, worker, tmp_path, monk
     finally:
         session.close()
 
-    assert len(results) == 6
+    assert len(results) == 10
 
 
 def test_rerank_rrf_input_is_still_capped_at_twenty(context, worker, tmp_path, monkeypatch) -> None:
@@ -437,6 +437,8 @@ def test_api_reranker_readiness_resets_on_failure_and_close(tmp_path, monkeypatc
     # 成功一次后，被替换为失败响应时必须重新回落为 false
     provider.rerank("学分认定", ["候选甲"])
     assert provider.loaded is True
+    # 先 close 释放复用客户端，下一次调用才会懒加载到失败客户端
+    provider.close()
     monkeypatch.setattr(
         "app.rerank.api.httpx.Client", _raising_client(RuntimeError("upstream down"))
     )
@@ -692,7 +694,10 @@ def test_api_embedding_becomes_ready_only_after_real_validated_response(
     assert len(captured) == 1, "必须真的发出一次请求"
     assert provider.loaded is True
 
-    # 失败响应（结构非法）必须回落为 false
+    # 失败响应（结构非法）必须回落为 false：
+    # 先 close 释放复用客户端，使下一次调用重新懒加载（拿到失败客户端）
+    provider.close()
+    assert provider.loaded is False
     monkeypatch.setattr(
         "app.embedding.api.httpx.Client",
         _raising_client(RuntimeError("upstream down")),

@@ -168,7 +168,7 @@ docker compose logs --no-color --tail 100
 
 ## 7. 阶段 5：Reranker
 
-输入：RRF 候选。输出：前 6 条带分数和引用元数据的结果。
+输入：RRF 候选。输出：默认前 10 条带分数和引用元数据的结果（硬上限 10，可显式请求更少）。
 
 验收：FakeReranker 可重复；CPU 默认可运行；GPU Profile 批次受限；Embedding 与 Reranker 不无界占用显存；存在 API/CPU 降级路径。
 
@@ -178,7 +178,7 @@ docker compose logs --no-color --tail 100
 
 ## 8. 阶段 6：SSE 问答与引用
 
-输入：Product Spec 限定的当前标签页消息与 filters，以及前 4–6 条证据。输出严格符合公共契约的 `token`、`citation`、`done`、`error`，包含拒答/冲突 outcome 和完整引用定位。
+输入：Product Spec 限定的当前标签页消息与 filters，以及重排后的至多 10 条证据。输出严格符合公共契约的 `token`、`citation`、`done`、`error`，包含拒答/冲突 outcome 和完整引用定位。
 
 测试：正常回答、无结果拒答、API 超时、取消、流中断、引用对齐、提示注入、冲突文档。
 
