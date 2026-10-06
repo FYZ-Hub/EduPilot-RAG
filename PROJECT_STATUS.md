@@ -2,8 +2,8 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 9 进行中（9A 离线检索评测 completed；9B 已具备评测资格但未通过——`incomplete`，评测契约已冻结）；阶段 8 已完成；阶段 10 未开始**
-- 下一阶段：**等待用户决定**——继续 9B（须先明确放开某一已被否决的能力边界）或带已知质量阻塞进入后续阶段；**不得自动定义或执行 9C**
+- 当前阶段：**阶段 10 已完成（`completed`，本轮验收并收口）；阶段 9 仍 `in_progress`（9A `completed`；9B `incomplete`——评测契约已冻结/frozen）；阶段 8 已完成**
+- 下一阶段：**阶段 10 已收口**；剩余可选项为前端 Playwright E2E 与 9B 的冻结决策，需用户决定；**不得自动定义或执行 9C**
 - 最近更新：2026-10-06
 
 ## 当前 9B 冻结结论（2026-10-06）
@@ -56,7 +56,59 @@
 | 7 | 确定性学分规则引擎 | completed |
 | 8 | Vue 核心页面 | completed |
 | 9 | RAG 评测与安全测试 | in_progress |
-| 10 | 一键启动与复现 | not_started |
+| 10 | 一键启动与复现 | completed |
+
+## 阶段 10 结论（2026-10-06，`completed`）
+
+阶段 10「一键启动与复现」已完成并通过验收。以下为**实测证据**。
+
+### 交付物
+
+- 根目录 `run.ps1` / `stop.ps1`：固定 `-Mode cpu|gpu`；CPU 只用基础 Compose，GPU 统一携带
+  `-f docker-compose.yml -f docker-compose.gpu.yml --profile gpu`；`stop.ps1` 只执行 `down`，
+  不删除数据卷、镜像或持久化数据。
+- `docker-compose.yml` 以 `${VAR:-default}` 透传 Embedding / Reranker / LLM 与检索公开配置；
+  默认仍是 `local` + `cpu`、无 GPU 声明，长期服务仍只有 `backend` 与 `frontend`。
+- `.env.example` 与 `docs/PRODUCT_SPEC.md` 已同步（`RERANK_TOP_K=10`）；
+  `.gitattributes` 固定根脚本 CRLF，脚本保持 UTF-8 BOM + 单一末尾换行。
+- 根目录 `README.md`：前置条件、离线 fake smoke、三种模式、API 字段、本地模型边界、
+  持久化与恢复、健康检查语义、CPU/GPU 常用命令与常见问题。
+
+### CPU 真实启动验收（隔离项目 `campus-rag-stage10-smoke`，fake Provider）
+
+- `run.ps1 -Mode cpu` **真实执行成功**（`-Mode cpu` 子进程退出码 0），输出完整
+  `[1/3]`→`[2/3]`→`[3/3]`，**后端健康端点与前端首页均返回 HTTP 200**；
+  容器 `HostConfig.DeviceRequests = null` → **无 GPU 申请**。
+- 启动后 `demo/status` 为 `state=empty, loaded=false, ready_documents=0, active_job_id=null`
+  → **没有自动 seed**。
+- `POST /api/demo/seed` 一次；**捕获到 `status=running`（stage=validating, processed=0/15）**后，
+  以 CPU 完整前缀 `restart backend` 一次（退出码 0）。
+- 任务终态：`completed`，**15 个文档全部 ready、0 失败**；`document_chunks=91`、`chunk_fts=91`；
+  `active_dataset_version=2026.1`；**`imported=14 / resumed=1`**（重启后确有文档被恢复处理）。
+- 持久化：`stop` → 同隔离变量再次 `run`（**未再次 seed**）→ 数据、active 版本与文档集合保留，
+  `demo_seed_jobs` **仅 1 行** → **无自动重复导入**。
+
+### 离线回归（全部使用本地镜像，`--network none`；未 pull、未安装依赖、未下载镜像）
+
+| 检查 | 结果 |
+|---|---|
+| backend 全量 `pytest` | **1273 passed**（exit 0） |
+| frontend `pnpm test` | **449 passed / 38 files**（exit 0） |
+| frontend `pnpm build` | **exit 0**（`✓ built in 4.16s`；仅有 chunk >500 kB 体积警告，非失败） |
+| 生成器 `pytest tests` | **124 passed, 1 skipped**（skip：Linux 生成器镜像无 PowerShell；同一 harness 已在宿主机 PowerShell 5.1 实测通过） |
+| 四类关键用例 | Embedding 缺配置 → `api_embedding_not_configured` 且不创建 Client；Rerank 缺配置 → `api_rerank_not_configured` 且不创建 Client；LLM 缺 Key → `LLM_PROVIDER_UNAVAILABLE`（503）；demo 租约/重启恢复 —— **全部通过** |
+| CPU / GPU `config --quiet`（`COMPOSE_DISABLE_ENV_FILE=1` + `--env-file .env.example`） | **均 exit 0** |
+| PowerShell `Parser::ParseFile`（`run.ps1` / `stop.ps1`） | **0 errors** |
+| 宿主机 `--detach` 转发 harness | 实际 argv = `compose\|-f\|docker-compose.yml\|up\|--build\|--detach` |
+| `git diff --check` | 0 |
+
+### 边界与未验证项（**不得夸大**）
+
+- **GPU**：仅完成静态 Compose 校验，**未做真实 GPU 运行验证**，**不得声称 GPU 已验证或可用**。
+- **本地模型边界**：默认 `backend` 镜像**不安装** `backend/requirements-embedding-local.txt`、
+  不含任何模型权重；`MODEL_CACHE_PATH` 指向 `./data/models`，`*_LOCAL_FILES_ONLY=true` 时不会隐式下载。
+  该边界已在 `README.md` 说明；本阶段 CPU 验收全程使用 `fake` Provider，**不代表真实模型质量**。
+- **前端 Playwright E2E** 未在本阶段重新执行。
 
 ## 阶段 9B 结论（2026-09-29 初始离线诊断；历史记录）
 

@@ -140,6 +140,9 @@ EMBEDDING_MODEL=BAAI/bge-m3
 EMBEDDING_DIMENSION=1024
 EMBEDDING_DEVICE=cpu
 EMBEDDING_BATCH_SIZE=4
+EMBEDDING_REVISION=
+EMBEDDING_LOCAL_FILES_ONLY=true
+EMBEDDING_TIMEOUT_SECONDS=30
 
 RERANK_PROVIDER=local
 RERANK_BASE_URL=
@@ -147,18 +150,23 @@ RERANK_API_KEY=
 RERANK_MODEL=BAAI/bge-reranker-v2-m3
 RERANK_DEVICE=cpu
 RERANK_BATCH_SIZE=2
+RERANK_REVISION=
+RERANK_LOCAL_FILES_ONLY=true
+RERANK_TIMEOUT_SECONDS=30
 
 LLM_PROVIDER=openai_compatible
 LLM_BASE_URL=
 LLM_API_KEY=
 LLM_MODEL=
 LLM_TIMEOUT_SECONDS=60
+LLM_ANSWER_MAX_CHARS=2000
+LLM_REWRITE_MAX_CHARS=300
 
 CHUNK_TARGET_CHARS=550
 CHUNK_OVERLAP_CHARS=100
 DENSE_TOP_K=12
 KEYWORD_TOP_K=12
-RERANK_TOP_K=6
+RERANK_TOP_K=10
 RETRIEVAL_SCORE_THRESHOLD=
 
 MAX_UPLOAD_MB=50
@@ -169,7 +177,19 @@ DEMO_DATASET_PATH=/app/demo
 DEMO_DATASET_VERSION=2026.1
 DEMO_JOB_POLL_SECONDS=2
 DEMO_JOB_LEASE_SECONDS=60
+
+VITE_API_BASE_URL=http://localhost:8000/api
 ```
+
+`docker-compose.yml` 以 `${VAR:-default}` 透传上表中的公开配置：Embedding / Reranker / LLM 及检索参数全部可经 `.env` 进入容器（含 `api` 模式所需的 Base URL、API Key 与模型名），未设置时回落到与 `.env.example` 完全一致的默认值（`local` + `cpu`）。
+
+### 4.3 启动与停止脚本
+
+- 仓库根目录提供 `run.ps1` 与 `stop.ps1`，参数固定为 `-Mode cpu|gpu`，缺省 `cpu`。
+- `cpu`：所有命令只使用基础 Compose（`docker compose -f docker-compose.yml ...`）。
+- `gpu`：所有命令统一携带 `-f docker-compose.yml -f docker-compose.gpu.yml --profile gpu`，任何子命令都不得丢失叠加文件或 profile。
+- `run.ps1` 依次执行配置校验（`config --quiet`，不打印解析后的环境变量）、`up --build -d`、健康等待，并输出前后端地址；不自动导入演示数据，GPU 失败时绝不静默回退 CPU。
+- `stop.ps1` 只执行 `down`，不删除任何数据卷。
 
 所有配置由单一 Settings 类校验。启动日志只报告配置是否存在，不输出密钥。`local`、`api`、`fake` Provider 实现同一接口。检索阈值通过评测确定，不得任意写死。
 
