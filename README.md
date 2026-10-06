@@ -38,7 +38,7 @@ Fake Provider 用来在不联网、不下载模型的前提下跑通端到端链
    .\run.ps1 -Mode cpu
    ```
 
-   脚本会依次做 Compose 配置校验、`up --build -d`，并**同时等待**后端
+   脚本会依次做 Compose 配置校验、`up --build --detach`，并**同时等待**后端
    `http://localhost:8000/api/health` 与前端 `http://localhost:5173` 都返回 HTTP 200，
    两者都通过后才输出启动成功。
 
@@ -167,3 +167,49 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu exe
 ```
 
 停止只移除容器与网络，`./data` 中的数据完整保留。
+
+## 12. 依赖清单与复现证据
+
+所有运行依赖均由版本化清单管理；复现时不需要在宿主机全局安装 Node.js、pnpm 或 Python 包。
+
+| 范围 | 依赖清单 | 用途 |
+|---|---|---|
+| 后端运行时 | `backend/requirements.txt` | FastAPI、SQLAlchemy、Chroma、文档解析与 API 客户端 |
+| 后端测试 | `backend/requirements-dev.txt` | 在运行时依赖基础上固定 pytest |
+| 可选本地模型 | `backend/requirements-embedding-local.txt` | 本地 Embedding / Reranker；默认镜像不安装 |
+| 前端 | `frontend/package.json`、`frontend/pnpm-lock.yaml` | Vue 3、Vite、TypeScript、Element Plus 与 Vitest |
+| 演示语料生成器 | `scripts/generator/requirements.txt` | 固定 PDF、DOCX、XLSX 生成与校验依赖 |
+
+环境变量模板为根目录 `.env.example`。其中包含端口、持久化路径、三个 Provider、检索、切片、
+上传限制和演示数据开关；真实 API Key 只允许写入未被 Git 跟踪的 `.env`。
+
+提交 `25c971d` 对应的离线验收记录：
+
+- backend：`1273 passed`；
+- frontend：`449 passed / 38 files`，生产构建通过；
+- 演示语料与运行脚本：`124 passed, 1 skipped`；唯一 skip 是 Linux 生成器镜像没有 PowerShell，
+  同一参数转发 harness 已在 Windows PowerShell 5.1 通过；
+- CPU 与 GPU Compose 均在禁用仓库 `.env`、仅使用 `.env.example` 时通过 `config --quiet`；
+- CPU smoke 已真实验证双端 HTTP 200、无 GPU 申请、显式 demo seed、任务重启恢复和持久化复用。
+
+更完整的阶段验收与命令记录见 `PROJECT_STATUS.md`。
+
+## 13. 已知质量边界
+
+- 正式语义评测 run `20261006-152530` 的 `citation_support_rate` 为 `34/41 = 0.8293`，
+  低于项目内部 `0.90` 门槛，因此阶段 9B 保持 `incomplete`，不得表述为已通过。
+- 离线 smoke 使用 fake Provider，只用于验证系统链路，不代表真实模型回答质量。
+- GPU 仅完成静态 Compose 校验；默认镜像不含本地模型依赖和权重，均不得表述为已完成运行验收。
+
+## 14. 获取代码
+
+公开仓库：`https://github.com/FYZ-Hub/EduPilot-RAG`
+
+```powershell
+git clone https://github.com/FYZ-Hub/EduPilot-RAG.git
+Set-Location EduPilot-RAG
+Copy-Item .env.example .env
+```
+
+仓库保留完整、细粒度 Git 演进历史。比赛用 AI 对话快照、演示视频和技术 PDF 作为独立提交材料，
+不放入代码仓库，避免大文件和敏感终端记录进入 Git 历史。
