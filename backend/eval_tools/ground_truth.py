@@ -85,6 +85,32 @@ def parse_case(payload: Any, *, line_number: int) -> GroundTruthCase:
     ):
         raise EvaluationDataError(f"用例 {case_id} 的 expected_source_paths 必须是字符串数组")
 
+    # required_evidence_groups：证据组（组间 AND、组内 OR）；外层允许为空（无必需证据）。
+    groups = _require(payload, "required_evidence_groups", case_id)
+    if not isinstance(groups, list) or any(
+        not isinstance(group, list)
+        or not group
+        or any(not isinstance(item, dict) for item in group)
+        for group in groups
+    ):
+        raise EvaluationDataError(
+            f"用例 {case_id} 的 required_evidence_groups 必须是非空 locator 对象数组的数组"
+        )
+
+    # supporting_* 是参考项：只校验类型，绝不参与选例、D1/D2/J、指标或门禁。
+    for key in ("supporting_answer_facts", "supporting_source_paths"):
+        values = _require(payload, key, case_id)
+        if not isinstance(values, list) or any(
+            not isinstance(item, str) or not item.strip() for item in values
+        ):
+            raise EvaluationDataError(f"用例 {case_id} 的 {key} 必须是字符串数组")
+
+    supporting_locators = _require(payload, "supporting_locators", case_id)
+    if not isinstance(supporting_locators, list) or any(
+        not isinstance(item, dict) for item in supporting_locators
+    ):
+        raise EvaluationDataError(f"用例 {case_id} 的 supporting_locators 必须是对象数组")
+
     should_refuse = _require(payload, "should_refuse", case_id)
     if not isinstance(should_refuse, bool):
         raise EvaluationDataError(f"用例 {case_id} 的 should_refuse 必须是布尔值")

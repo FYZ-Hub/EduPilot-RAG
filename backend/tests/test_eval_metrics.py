@@ -158,7 +158,12 @@ def test_load_rejects_invalid_lines_and_duplicates(tmp_path: Path) -> None:
         "id": "dup",
         "category": "single_doc",
         "question": "q",
+        "expected_answer_facts": [],
         "expected_source_paths": ["corpus/a.pdf"],
+        "expected_locators": [],
+        "supporting_answer_facts": [],
+        "supporting_source_paths": [],
+        "supporting_locators": [],
         "should_refuse": False,
     }
     duplicate.write_text(f"{json.dumps(row)}\n{json.dumps(row)}\n", encoding="utf-8")
@@ -192,10 +197,33 @@ def test_parse_case_type_checks() -> None:
                 "category": "c",
                 "question": "q",
                 "expected_source_paths": [],
+                "supporting_answer_facts": [],
+                "supporting_source_paths": [],
+                "supporting_locators": [],
                 "should_refuse": "no",
             },
             line_number=1,
         )
+
+
+def test_parse_case_rejects_illegal_supporting_types() -> None:
+    base = {
+        "id": "x",
+        "category": "c",
+        "question": "q",
+        "expected_answer_facts": [],
+        "expected_source_paths": [],
+        "expected_locators": [],
+        "should_refuse": False,
+    }
+    for bad in (
+        {"supporting_answer_facts": "not-a-list", "supporting_source_paths": [], "supporting_locators": []},
+        {"supporting_answer_facts": [], "supporting_source_paths": [1], "supporting_locators": []},
+        {"supporting_answer_facts": [], "supporting_source_paths": [], "supporting_locators": ["x"]},
+        {"supporting_answer_facts": [], "supporting_source_paths": []},
+    ):
+        with pytest.raises(EvaluationDataError):
+            parse_case({**base, **bad}, line_number=1)
 
 
 def test_select_cases_applies_documented_rule() -> None:

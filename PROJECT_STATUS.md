@@ -2,9 +2,45 @@
 
 - 项目：校园多源文档 RAG 学业规划助手（启明大学模拟资料）
 - 当前运行模式：**默认 CPU**（不申请 GPU / CUDA；`gpu` Profile 保持关闭）
-- 当前阶段：**阶段 9 进行中（9A 离线检索评测 completed；9B 离线问答与学业评测诊断为 incomplete/deferred）；阶段 8 已完成；阶段 10 未开始**
-- 下一阶段：**阶段 9B 收尾**——需先提供显式语义 profile、完整配置并完成一次真实调用，才能评测引用支持率 / 拒答正确率 / 注入抵抗；阶段 9 整体仍为 `in_progress`，**不得标记 `completed`**
-- 最近更新：2026-09-29
+- 当前阶段：**阶段 9 进行中（9A 离线检索评测 completed；9B 已具备评测资格但未通过——`incomplete`，评测契约已冻结）；阶段 8 已完成；阶段 10 未开始**
+- 下一阶段：**等待用户决定**——继续 9B（须先明确放开某一已被否决的能力边界）或带已知质量阻塞进入后续阶段；**不得自动定义或执行 9C**
+- 最近更新：2026-10-06
+
+## 当前 9B 冻结结论（2026-10-06）
+
+结论：**阶段 9 = `in_progress`（不变）、9A = `completed`（不变）、9B = `incomplete`（qualified but failed）**。
+四 Provider 全部 `VERIFIED`、readiness=true，三项正式语义指标已**真实评测**；
+`citation_support_rate` 未达 0.90 阈值，**9B 未通过**。
+
+> 说明：本节取代下方「阶段 9B 结论（2026-09-29 初始离线诊断，历史记录）」中的旧状态口径
+> （旧口径为 `incomplete/deferred`，因当时 Provider 无语义能力、正式指标为 `null`）。
+
+### 最新正式基线（run `20261006-152530`）
+
+- schema `rag-qa-eval/3.21`；`readiness = true`；四 Provider 全 `VERIFIED`
+  （embedding 78/78、rerank 49/49、llm 49/49、judge 40/40，`failed = 0`）；
+  无 rerank 降级、隔离快照前后无变化（`side_effect_free = true`）。
+- 正式指标（实测）：`planning_correctness = 1.0`、`citation_contract_rate = 0.9756`、
+  `citation_source_hit_rate = 0.9512`、`citation_support_rate = 34/41 = 0.8293`、
+  `refusal_correctness = 1.0`、`injection_resistance = 1.0`。
+- `citation_support_rate` **低于 0.90** → `exit_code = 1`、`stage9b_passed = false`、
+  `stage_completion = incomplete`。
+- 达标需 **≥ 37/41**（0.90 × 41 = 36.9），当前**缺 3 例**；其中可稳定修复的失败仅 **2 例**，
+  缺口至少还差 1 例必须来自**运行波动**用例 → 在「稳定修复」口径下 **0.90 不可达**。
+
+### 口径声明（避免误读）
+
+- 相对早期 run 的分数提升（`0.8049 → 0.8293`）**来自经语料审计的评测契约修正**
+  （3.20 / 3.21 ground truth 的等价证据），**不得表述为模型质量提升**；
+  剔除受契约影响的用例后，等价子集通过数由 **33 降为 31**。
+- 剩余问题集中于**漏答、无故拒答、引用选择、final 截断**；已审计的方案（来源 cap、
+  展示轮转、claims、新 Prompt、自检二次调用等）**均无足够低风险收益**，不予实施。
+- 唯一稳定的排查方向（final 证据上限）触碰现行规格，且按单例过拟合，不予实施。
+
+### 冻结决定
+
+- **冻结 9B 为「未通过」**：**不降低阈值（0.90）、不放宽 Judge、不继续按运行结果修改 ground truth**。
+- `gt-conflict-003` 全程不纳入分析。
 
 ## 阶段状态
 
@@ -22,7 +58,7 @@
 | 9 | RAG 评测与安全测试 | in_progress |
 | 10 | 一键启动与复现 | not_started |
 
-## 阶段 9B 结论（离线问答与学业评测诊断：incomplete/deferred）
+## 阶段 9B 结论（2026-09-29 初始离线诊断；历史记录）
 
 结论：**阶段 9 = `in_progress`（不变），9A = `completed`（不变），9B = `incomplete/deferred`**。
 本轮**只提交离线诊断基础设施**，**不接入真实模型、不宣称质量通过**。
