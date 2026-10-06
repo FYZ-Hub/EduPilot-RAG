@@ -29,6 +29,10 @@ GROUND_TRUTH_FIELDS = [
     "expected_answer_facts",
     "expected_source_paths",
     "expected_locators",
+    "required_evidence_groups",
+    "supporting_answer_facts",
+    "supporting_source_paths",
+    "supporting_locators",
     "should_refuse",
     "conflict_expected",
     "planning_input",
@@ -602,6 +606,106 @@ def validate_ground_truth(root: Path, manifest: dict) -> tuple[list[dict], list[
                 problems.append(f"{gt_id}: locator 路径不在 manifest 中：{rel}")
                 continue
             reader.check_locator(rel, locator, gt_id, problems)
+
+        # --- required_evidence_groups：组间 AND、组内 OR（正式必需项） ------------
+        locator_key = lambda locator: tuple(sorted(locator.items()))  # noqa: E731
+        groups = entry.get("required_evidence_groups")
+        if not isinstance(groups, list):
+            problems.append(f"{gt_id}: required_evidence_groups 必须是数组")
+        else:
+            flat_keys = sorted(locator_key(locator) for locator in locators)
+            alternative_keys: list[tuple] = []
+            seen_groups: set[tuple] = set()
+            group_sources: set[str] = set()
+            for group_index, group in enumerate(groups, start=1):
+                if not isinstance(group, list) or not group:
+                    problems.append(f"{gt_id}: 第 {group_index} 组必须是非空数组")
+                    continue
+                group_keys: list[tuple] = []
+                for alternative in group:
+                    if not isinstance(alternative, dict):
+                        problems.append(f"{gt_id}: 第 {group_index} 组元素必须是 locator 对象")
+                        continue
+                    rel = alternative.get("path")
+                    if rel not in manifest_paths:
+                        problems.append(
+                            f"{gt_id}: 第 {group_index} 组 locator 路径不在 manifest 中：{rel}"
+                        )
+                        continue
+                    reader.check_locator(rel, alternative, f"{gt_id} group{group_index}", problems)
+                    group_sources.add(rel)
+                    key = locator_key(alternative)
+                    if key in group_keys:
+                        problems.append(f"{gt_id}: 第 {group_index} 组内备选重复")
+                    group_keys.append(key)
+                    alternative_keys.append(key)
+                group_identity = tuple(sorted(group_keys))
+                if group_identity in seen_groups:
+                    problems.append(f"{gt_id}: 证据组重复")
+                seen_groups.add(group_identity)
+            if sorted(alternative_keys) != flat_keys:
+                problems.append(
+                    f"{gt_id}: required_evidence_groups 备选并集与 expected_locators 不一致"
+                )
+            if group_sources != source_set:
+                problems.append(
+                    f"{gt_id}: required_evidence_groups 备选来源与 expected_source_paths 不一致"
+                )
+            if not groups and source_paths:
+                problems.append(f"{gt_id}: 有期望来源的用例必须至少包含一个证据组")
+            if groups and not source_paths:
+                problems.append(f"{gt_id}: 无期望来源的用例不得携带证据组")
+
+        # --- supporting_*：参考项，不参与 D1/D2/J、指标与门禁 ------------------
+        required_facts = list(entry.get("expected_answer_facts") or [])
+        supporting_facts = entry.get("supporting_answer_facts")
+        supporting_paths = entry.get("supporting_source_paths")
+        supporting_locators = entry.get("supporting_locators")
+        for label, value in (
+            ("supporting_answer_facts", supporting_facts),
+            ("supporting_source_paths", supporting_paths),
+            ("supporting_locators", supporting_locators),
+        ):
+            if not isinstance(value, list):
+                problems.append(f"{gt_id}: {label} 必须是数组")
+        if not all(isinstance(value, list) for value in (supporting_facts, supporting_paths, supporting_locators)):
+            continue
+        if any(not isinstance(fact, str) or not fact.strip() for fact in supporting_facts):
+            problems.append(f"{gt_id}: supporting_answer_facts 必须是非空字符串数组")
+        if any(not isinstance(path, str) or not path.strip() for path in supporting_paths):
+            problems.append(f"{gt_id}: supporting_source_paths 必须是非空字符串数组")
+        if any(not isinstance(locator, dict) for locator in supporting_locators):
+            problems.append(f"{gt_id}: supporting_locators 必须是对象数组")
+            continue
+        if set(required_facts) & set(supporting_facts):
+            problems.append(f"{gt_id}: required/supporting 事实不得重复")
+        if len(set(supporting_facts)) != len(supporting_facts):
+            problems.append(f"{gt_id}: supporting_answer_facts 自身不得重复")
+        if set(source_paths) & set(supporting_paths):
+            problems.append(f"{gt_id}: required/supporting 来源路径不得交叉")
+        supporting_locator_paths = [locator.get("path") for locator in supporting_locators]
+        if set(supporting_paths) != set(supporting_locator_paths):
+            missing = sorted(set(supporting_paths) - set(supporting_locator_paths))
+            extra = sorted(set(supporting_locator_paths) - set(supporting_paths))
+            problems.append(
+                f"{gt_id}: supporting 来源与定位不一致（缺少定位={missing} 多余定位={extra}）"
+            )
+        for rel in supporting_paths:
+            if rel not in manifest_paths:
+                problems.append(f"{gt_id}: supporting 引用路径不在 manifest 中：{rel}")
+        if {locator_key(locator) for locator in locators} & {
+            locator_key(locator) for locator in supporting_locators
+        }:
+            problems.append(f"{gt_id}: required/supporting locator 不得完全重复")
+        for locator in supporting_locators:
+            rel = locator.get("path")
+            if rel not in manifest_paths:
+                problems.append(f"{gt_id}: supporting locator 路径不在 manifest 中：{rel}")
+                continue
+            reader.check_locator(rel, locator, f"{gt_id} supporting", problems)
+        if entry.get("should_refuse") or entry.get("category") in ("prompt_injection", "planning"):
+            if supporting_facts or supporting_paths or supporting_locators:
+                problems.append(f"{gt_id}: 拒答/注入/规划用例的 supporting 三字段必须为空")
 
         if entry.get("conflict_expected"):
             for rel in source_paths:

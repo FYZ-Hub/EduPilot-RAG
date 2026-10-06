@@ -815,6 +815,10 @@ GROUND_TRUTH_FIELDS = [
     "expected_answer_facts",
     "expected_source_paths",
     "expected_locators",
+    "required_evidence_groups",
+    "supporting_answer_facts",
+    "supporting_source_paths",
+    "supporting_locators",
     "should_refuse",
     "conflict_expected",
     "planning_input",
@@ -822,7 +826,33 @@ GROUND_TRUTH_FIELDS = [
 ]
 
 
-def _entry(gt_id, category, question, answer_facts, paths, locators, *, should_refuse=False, conflict_expected=False, planning_input=None, planning_result=None):
+def _entry(
+    gt_id,
+    category,
+    question,
+    answer_facts,
+    paths,
+    locators,
+    *,
+    required_evidence_groups=None,
+    supporting_answer_facts=(),
+    supporting_source_paths=(),
+    supporting_locators=(),
+    should_refuse=False,
+    conflict_expected=False,
+    planning_input=None,
+    planning_result=None,
+):
+    """按 ``GROUND_TRUTH_FIELDS`` 固定键序组装一条记录。
+
+    ``expected_*`` 是正式必需项（参与 D1/D2/J、指标与门禁）；``required_evidence_groups``
+    是**证据组**（组间 AND、组内 OR），缺省时由 ``expected_locators`` 派生为**单元素组**；
+    ``supporting_*`` 是参考项，只作记录，不参与任何判定。
+    """
+    if required_evidence_groups is None:
+        groups = [[dict(locator)] for locator in locators]
+    else:
+        groups = [[dict(alternative) for alternative in group] for group in required_evidence_groups]
     return dict(
         zip(
             GROUND_TRUTH_FIELDS,
@@ -833,6 +863,10 @@ def _entry(gt_id, category, question, answer_facts, paths, locators, *, should_r
                 answer_facts,
                 paths,
                 locators,
+                groups,
+                list(supporting_answer_facts),
+                list(supporting_source_paths),
+                list(supporting_locators),
                 should_refuse,
                 conflict_expected,
                 planning_input,
@@ -867,6 +901,14 @@ def _records_locator(corpus: Corpus, file_name: str, student_key: str, *, with_h
     return corpus.xlsx_locator(
         file_name, "课程记录", 2 if with_header else 3, _records_row_end(student_key)
     )
+
+
+def _record_row(student_key: str, course_code: str) -> int:
+    """某条课程记录在 ``课程记录`` 工作表中的 1-based 行号（1 行标识 + 1 行表头）。"""
+    for index, record in enumerate(facts.RECORDS[student_key]):
+        if record["course_code"] == course_code:
+            return 3 + index
+    raise KeyError(course_code)
 
 
 def _schedule_locator(corpus: Corpus, file_name: str, first_index: int, last_index: int | None = None) -> dict:
@@ -1003,9 +1045,10 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "gt-single-003",
         "single_doc",
         "QM-CS201 数据结构课程的学分是多少？",
-        ["QM-CS201 数据结构：4.0 学分", "课程类别：专业必修"],
+        ["QM-CS201 数据结构：4.0 学分"],
         [S201],
         [corpus.docx_locator(F_SYL_201, "一、课程基本信息")],
+        supporting_answer_facts=["课程类别：专业必修"],
     )
     add(
         "gt-single-004",
@@ -1117,11 +1160,13 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "gt-cross-001",
         "cross_doc",
         "QM-CS201 数据结构在哪个学期开课，学分是多少，先修课程是什么？",
-        ["学分：4.0", "课程类别：专业必修", "建议学期：第3学期", "先修课程：QM-CS101 程序设计基础"],
-        [P26, S201, SCH1],
-        [
+        ["学分：4.0", "建议学期：第3学期", "先修课程：QM-CS101 程序设计基础"],
+        [S201],
+        [corpus.docx_locator(F_SYL_201, "一、课程基本信息")],
+        supporting_answer_facts=["课程类别：专业必修"],
+        supporting_source_paths=[P26, SCH1],
+        supporting_locators=[
             corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS201"),
-            corpus.docx_locator(F_SYL_201, "一、课程基本信息"),
             *_schedule_code_locators(corpus, F_SCHED_1, facts.SCHEDULE_2026_2027_1, "QM-CS201"),
         ],
     )
@@ -1141,10 +1186,11 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "cross_doc",
         "匿名学生A 已通过的专业必修课程有哪些，学分合计是多少？",
         ["已通过专业必修：QM-CS101 程序设计基础 4.0 学分、QM-CS104 计算机导论 2.0 学分", "合计 6.0 学分"],
-        [REC_A, P26],
-        [
-            _records_locator(corpus, F_RECORDS_A, "student_a"),
-            corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS101"),
+        [REC_A],
+        [_records_locator(corpus, F_RECORDS_A, "student_a")],
+        supporting_source_paths=[P26],
+        supporting_locators=[
+            corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS101")
         ],
     )
     add(
@@ -1163,23 +1209,26 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "cross_doc",
         "QM-CS105 线性代数不及格后应如何处理？",
         ["可参加补考；补考仍不及格须重修", "补考安排在 2026-08-26 14:00-16:00，地点 QM-A210", "同一课程多次重修只认定一次学分"],
-        [P_RETAKE, EX_MAKEUP, REC_B],
+        [P_RETAKE, EX_MAKEUP],
         [
             corpus.docx_locator(F_POLICY_RETAKE, "第二章 补考规则"),
+            corpus.docx_locator(F_POLICY_RETAKE, "第三章 重修规则"),
             corpus.pdf_locator(F_EXAM_MAKEUP, "二、补考时间与地点"),
-            _records_locator(corpus, F_RECORDS_B, "student_b"),
         ],
+        supporting_source_paths=[REC_B],
+        supporting_locators=[_records_locator(corpus, F_RECORDS_B, "student_b")],
     )
     add(
         "gt-cross-006",
         "cross_doc",
         "2026 修订版培养方案比 2025 版新增了哪门专业必修课程？",
-        ["2026 修订版新增专业必修：QM-CS303 计算机网络（3.0 学分）", "2025 版专业必修课程共 7 门，不含 QM-CS303"],
+        ["2026 修订版新增专业必修：QM-CS303 计算机网络（3.0 学分）"],
         [P25, P26],
         [
             corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS303"),
             corpus.pdf_locator_for_text(F_PLAN_2025, "四、课程设置与先修关系", "专业必修课程共 7 门"),
         ],
+        supporting_answer_facts=["2025 版专业必修课程共 7 门，不含 QM-CS303"],
     )
     add(
         "gt-cross-007",
@@ -1190,6 +1239,16 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         [
             _records_locator(corpus, F_RECORDS_B, "student_b"),
             corpus.pdf_locator(F_PLAN_2026, "三、学分要求"),
+            corpus.xlsx_locator(F_RECORDS_B, "汇总", 3, 9),
+        ],
+        required_evidence_groups=[
+            # 组 1（AND 必需）：学生B 课程记录（线性代数=公共必修）
+            [_records_locator(corpus, F_RECORDS_B, "student_b")],
+            # 组 2（OR）：2026 方案三、学分要求 或 学生B 汇总（公共必修 55 / 依据版本 2026.1）
+            [
+                corpus.pdf_locator(F_PLAN_2026, "三、学分要求"),
+                corpus.xlsx_locator(F_RECORDS_B, "汇总", 3, 9),
+            ],
         ],
     )
     add(
@@ -1197,10 +1256,28 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "cross_doc",
         "QM-GE101 大学写作在课表中的上课时间与其课程类别归属是什么？",
         ["课程类别：通识选修", "上课时间：星期二第3-4节（1-16周），教室 QM-B102"],
-        [SCH1, P26],
+        [SCH1, P26, REC_A],
         [
             *_schedule_code_locators(corpus, F_SCHED_1, facts.SCHEDULE_2026_2027_1, "QM-GE101"),
             corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-GE101"),
+            corpus.xlsx_locator(
+                F_RECORDS_A,
+                "课程记录",
+                _record_row("student_a", "QM-GE101"),
+                _record_row("student_a", "QM-GE101"),
+            ),
+        ],
+        required_evidence_groups=[
+            _schedule_code_locators(corpus, F_SCHED_1, facts.SCHEDULE_2026_2027_1, "QM-GE101"),
+            [
+                corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-GE101"),
+                corpus.xlsx_locator(
+                    F_RECORDS_A,
+                    "课程记录",
+                    _record_row("student_a", "QM-GE101"),
+                    _record_row("student_a", "QM-GE101"),
+                ),
+            ],
         ],
     )
 
@@ -1210,8 +1287,19 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "course_code",
         "课程代码 QM-CS302 对应哪门课程，学分是多少？",
         ["QM-CS302 数据库系统", "学分：4.0"],
-        [P26],
-        [corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS302")],
+        [P26, P25, S302],
+        [
+            corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS302"),
+            corpus.pdf_locator_for_text(F_PLAN_2025, "四、课程设置与先修关系", "QM-CS302"),
+            corpus.docx_locator(F_SYL_302, "一、课程基本信息"),
+        ],
+        required_evidence_groups=[
+            [
+                corpus.pdf_locator_for_text(F_PLAN_2026, "四、课程设置与先修关系", "QM-CS302"),
+                corpus.pdf_locator_for_text(F_PLAN_2025, "四、课程设置与先修关系", "QM-CS302"),
+                corpus.docx_locator(F_SYL_302, "一、课程基本信息"),
+            ]
+        ],
     )
     add(
         "gt-code-002",
@@ -1319,23 +1407,34 @@ def build_ground_truth(corpus: Corpus) -> list[dict]:
         "gt-conflict-001",
         "version_conflict",
         "计算机科学与技术专业的毕业总学分到底是多少？是否存在不同版本？",
-        ["2025 版培养方案：155.0 学分", "2026 修订版培养方案：160.0 学分", "两个版本同时存在，须由用户确认适用版本"],
+        ["2025 版培养方案：155.0 学分", "2026 修订版培养方案：160.0 学分"],
         [P25, P26],
         [
             corpus.pdf_locator(F_PLAN_2026, "三、学分要求"),
             corpus.pdf_locator(F_PLAN_2025, "三、学分要求"),
         ],
+        supporting_answer_facts=["两个版本同时存在，须由用户确认适用版本"],
         conflict_expected=True,
     )
     add(
         "gt-conflict-002",
         "version_conflict",
         "交流课程学分认定上限在不同文件中的规定是否一致？",
-        ["2026 修订版培养方案：单次最多认定 8 学分", "学分认定办法：单次最多认定 6 学分", "两处规定冲突"],
-        [P26, P_RETAKE],
+        ["2026 修订版培养方案：单次最多认定 8 学分", "另一份文件规定：交流课程单次最多认定 6 学分", "两处规定冲突"],
+        [P26, P_RETAKE, P25],
         [
             corpus.pdf_locator(F_PLAN_2026, "三、学分要求"),
             corpus.docx_locator(F_POLICY_RETAKE, "第四章 学分认定与转换"),
+            corpus.pdf_locator(F_PLAN_2025, "三、学分要求"),
+        ],
+        required_evidence_groups=[
+            # 组 1（AND 必需）：2026 修订版培养方案三、学分要求（8 学分）
+            [corpus.pdf_locator(F_PLAN_2026, "三、学分要求")],
+            # 组 2（OR）：学分认定办法第四章 或 2025 版培养方案三、学分要求（均为 6 学分）
+            [
+                corpus.docx_locator(F_POLICY_RETAKE, "第四章 学分认定与转换"),
+                corpus.pdf_locator(F_PLAN_2025, "三、学分要求"),
+            ],
         ],
         conflict_expected=True,
     )
