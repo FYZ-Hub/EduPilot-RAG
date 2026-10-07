@@ -12,11 +12,11 @@
 
 - Docker Desktop（含 Compose v2，`docker compose version` 可用）
 - Windows PowerShell 5.1 或更高（仓库自带的 `run.ps1` / `stop.ps1` 以 `#Requires -Version 5.1` 声明）
-- 无需联网即可完成下面的 smoke 流程（不下载权重、不调用外部模型）
+- 以下 Fake Provider smoke 不下载模型权重、不调用外部模型；首次构建 Docker 镜像时仍可能需要联网获取基础镜像和软件依赖。若这些构建资源均已在本机缓存，可离线运行。
 
-## 2. 10 分钟离线 Smoke（Fake Provider）
+## 2. 约 10 分钟 Smoke（Fake Provider；已缓存依赖时可离线）
 
-Fake Provider 用来在不联网、不下载模型的前提下跑通端到端链路；**它不代表真实模型质量**。
+Fake Provider 用来在不调用外部模型、不下载模型权重的前提下跑通端到端链路；**它不代表真实模型质量**。首次运行时间取决于镜像和依赖是否已缓存。
 
 1. 复制配置样例：
 
@@ -42,7 +42,7 @@ Fake Provider 用来在不联网、不下载模型的前提下跑通端到端链
    `http://localhost:8000/api/health` 与前端 `http://localhost:5173` 都返回 HTTP 200，
    两者都通过后才输出启动成功。
 
-4. 打开 `http://localhost:5173`，进入**知识库管理**页面（`/knowledge`），在「演示资料」面板中
+4. 打开 `http://localhost:5173` 首页，通过导航或能力卡片进入**知识库管理**页面（`/knowledge`），在「演示资料」面板中
    **显式点击「加载演示资料」按钮**。演示导入不会被自动触发；禁用状态下按钮文案会变为
    「演示资料不可用」并给出原因。
 
@@ -116,12 +116,14 @@ LLM_MODEL=
 
 ## 8. 健康检查语义
 
-- `GET http://localhost:8000/api/health` **返回 HTTP 200 只表示后端进程可访问**；
-  响应中的 `status` 固定为 `degraded`。
-- 是否真正可用要看 `capabilities`（`documents` / `chat` / `planning`）与
-  `providers[].ready`：只有 Provider 真正加载成功或调用成功过才会为 `true`。
-- 因此 **200 不等于全部 Provider ready**；`chat` 在未配置 LLM 或没有可检索语料时会分别为
-  `unconfigured` / `unavailable`。
+- `GET http://localhost:8000/api/health` **返回 HTTP 200 只表示后端进程可访问**。
+  `status` 根据三项能力前置条件动态计算：`documents`、`chat`、`planning` 全为 `ready` 时是
+  `healthy`，否则是 `degraded`。`healthy` 不代表端到端模型调用、回答质量或引用正确性已验证。
+- 具体能力看 `capabilities`（`documents` / `chat` / `planning`）；Provider 成功调用证据看
+  `providers.embedding.ready`、`providers.reranker.ready`、`providers.llm.ready`。API Provider
+  首次成功调用前为 `false`，**不表示已经故障**，也不参与 `status` 判定。
+- 因此 **200 或 `healthy` 都不等于全部 Provider ready**；`chat` 在未配置 LLM 或没有可检索语料时会分别为
+  `unconfigured` / `unavailable`。空知识库不影响 `documents=ready`，但会使 `chat=unavailable`。
 
 ## 9. 演示数据、上传与常用命令
 

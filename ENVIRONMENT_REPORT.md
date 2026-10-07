@@ -110,12 +110,12 @@
 复检（2026-09-26，用户已手动启动 Docker Desktop）：
 
 - `docker version` — exit 0 — Client 29.5.3 + Server 29.5.3（Docker Desktop 4.79.0）均可用
-- `docker info --format ...` — 输出 `ServerVersion=29.5.3 Driver=overlayfs OSType=linux Arch=x86_64 CPUs=32`；docker 命令本身 exit 0（注：调用过程中沙箱拦截了对 Docker Desktop 日志路径 `C:\Users\lenovo\AppData\Local\Docker\log\host\docker-desktop.exe.log` 的读取，非致命，不影响 daemon 判定）
+- `docker info --format ...` — 输出 `ServerVersion=29.5.3 Driver=overlayfs OSType=linux Arch=x86_64 CPUs=32`；docker 命令本身 exit 0（注：调用过程中沙箱拦截了对 Docker Desktop 日志路径 `<用户目录>\AppData\Local\Docker\log\host\docker-desktop.exe.log` 的读取，非致命，不影响 daemon 判定；宿主路径已脱敏）
 - `docker compose version` — exit 0 — v5.1.4
 - `docker context show` — exit 0 — `desktop-linux`
 - `docker system df` — exit 0 — Images 8/12.95GB，Containers 5，Volumes 11/402.4MB，Build Cache 42/5.525GB
 - `git rev-parse --is-inside-work-tree`（复检前）— exit 128 — 当时尚不是仓库
-- `git init -b main` — exit 0 — 初始化空仓库于 `F:/毕业实训/EduPilot RAG1/.git/`
+- `git init -b main` — exit 0 — 初始化空仓库于 `<项目根目录>/.git/`（宿主路径已脱敏）
 - `git config --local user.name` / `--local user.email` — exit 1 — 未配置
 - `git config --global user.name` / `--global user.email` — exit 1 — 未配置
 - `git status --short` — exit 0 — 仅 5 项未跟踪规划文件，无敏感内容
@@ -136,7 +136,7 @@
 
 上一轮（2026-09-26 首次预检，保留备查）：
 
-- `Get-Location` — exit 0 — `F:\毕业实训\EduPilot RAG1`
+- `Get-Location` — exit 0 — `<项目根目录>`（宿主路径已脱敏）
 - `Test-Path .git` — exit 0 — `False`
 - `docker version` / `docker info` / `docker system df` — exit 1 — 当时 daemon 不可连接
 - `wsl --status` — exit 0 — 默认分发 Ubuntu，默认版本 2
