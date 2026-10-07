@@ -124,3 +124,83 @@ def test_health_does_not_leak_configuration(client: TestClient) -> None:
         assert leaked not in body
 
     assert set(response.json().keys()) == {"status", "version", "capabilities", "providers"}
+
+
+def test_health_status_is_healthy_when_all_capabilities_are_ready(
+    client: TestClient, monkeypatch
+) -> None:
+    """三项能力前置条件都满足（含"存在可检索语料"）时 ``status`` 才为 ``healthy``。"""
+    monkeypatch.setattr("app.api.health._retrievable_documents", lambda _context: 1)
+
+    payload = client.get("/api/health").json()
+
+    assert payload["capabilities"] == {
+        "documents": "ready",
+        "chat": "ready",
+        "planning": "ready",
+    }
+    assert payload["status"] == "healthy"
+
+
+def test_health_status_is_degraded_when_any_capability_is_missing(
+    client: TestClient, monkeypatch
+) -> None:
+    """只要有一项能力不 ready 就是 ``degraded``——包括"有语料但规划查询失败"的部分可用场景。"""
+    monkeypatch.setattr("app.api.health._retrievable_documents", lambda _context: 2)
+    monkeypatch.setattr("app.api.health._planning_capability", lambda _context: "unavailable")
+
+    payload = client.get("/api/health").json()
+
+    assert payload["capabilities"]["chat"] == "ready"
+    assert payload["capabilities"]["planning"] == "unavailable"
+    assert payload["status"] == "degraded"
+
+
+def test_provider_without_successful_call_neither_degrades_status_nor_blocks_first_chat(
+    tmp_path, monkeypatch
+) -> None:
+    """API Provider 在首次成功调用前 ``ready=false`` 属正常：
+
+    - 它**不得**把 ``status`` 压成 ``degraded``（否则服务被永久锁死）；
+    - 它**不得**阻止 ``capabilities.chat`` 为 ready（否则永远无法产生第一次成功调用）。
+    """
+    settings = build_settings(
+        tmp_path,
+        embedding_provider="api",
+        rerank_provider="api",
+        llm_provider="openai_compatible",
+        llm_base_url="https://llm.invalid/v1",
+        llm_model="demo-model",
+        llm_api_key="test-key-not-a-real-secret",
+    )
+    application = create_app(settings)
+    with TestClient(application) as client:
+        monkeypatch.setattr("app.api.health._retrievable_documents", lambda _context: 3)
+        payload = client.get("/api/health").json()
+    application.state.context.engine.dispose()
+
+    # 尚无任何真实成功调用
+    assert payload["providers"]["embedding"]["ready"] is False
+    assert payload["providers"]["reranker"]["ready"] is False
+    assert payload["providers"]["llm"]["ready"] is False
+    # 但能力与状态都不被 Provider 的 ready 拖累
+    assert payload["capabilities"]["chat"] == "ready"
+    assert payload["status"] == "healthy"
+
+
+def test_health_opens_no_socket_and_loads_no_model(client: TestClient, monkeypatch) -> None:
+    """健康检查必须完全离线：不建连、不加载/调用任何模型。"""
+    import socket
+
+    def _forbidden(*_args, **_kwargs):
+        raise AssertionError("健康检查不得发起任何网络连接")
+
+    monkeypatch.setattr(socket.socket, "connect", _forbidden)
+    monkeypatch.setattr(socket.socket, "connect_ex", _forbidden)
+    monkeypatch.setattr(socket, "create_connection", _forbidden)
+
+    response = client.get("/api/health")
+    assert response.status_code == 200
+
+    # Fake Embedding 永远不会"已加载"：说明健康检查没有触发任何模型工作
+    assert response.json()["providers"]["embedding"]["ready"] is False

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
 import { RouterView, useRoute } from 'vue-router'
-import { Menu as MenuIcon, Reading } from '@element-plus/icons-vue'
+import { ArrowDown, Menu as MenuIcon, Reading } from '@element-plus/icons-vue'
 
 import AppNav from '@/components/common/AppNav.vue'
 import { describeDatasetState } from '@/domain/demoState'
@@ -27,21 +27,8 @@ const statusKind = computed(() => {
   return health.connection === 'error' ? 'down' : 'pending'
 })
 
-const statusText = computed(() => {
-  switch (statusKind.value) {
-    case 'ok':
-      return '后端正常'
-    case 'degraded':
-      return '后端降级运行'
-    case 'down':
-      return '后端不可连接'
-    default:
-      return '正在检测后端'
-  }
-})
-
-/** 侧栏概况：只用真实文档列表与 demo status，未就绪时不展示任何数字。 */
-const summaryText = computed(() => {
+/** 资料层：只用真实文档列表，未就绪或查询失败时不展示任何数字。 */
+const libraryText = computed(() => {
   if (documents.loaded) {
     return `可检索 ${documents.retrievableCount} / 共 ${documents.total}`
   }
@@ -84,7 +71,7 @@ onMounted(() => {
 
       <div class="ep-sidebar__footer" aria-label="知识库概况">
         <p class="ep-sidebar__footer-title">知识库概况</p>
-        <p class="ep-sidebar__footer-hint">{{ summaryText }}</p>
+        <p class="ep-sidebar__footer-hint">{{ libraryText }}</p>
         <p class="ep-sidebar__footer-hint">演示数据：{{ datasetText }}</p>
       </div>
     </aside>
@@ -107,10 +94,89 @@ onMounted(() => {
         </div>
 
         <div class="ep-topbar__right">
-          <span class="ep-status">
-            <span class="ep-status__dot" :class="`ep-status__dot--${statusKind}`" aria-hidden="true" />
-            <span class="ep-status__text">{{ statusText }}</span>
-          </span>
+          <ElPopover
+            trigger="click"
+            placement="bottom-end"
+            :width="340"
+            :teleported="false"
+            popper-class="ep-health-popover"
+          >
+            <template #reference>
+              <button
+                type="button"
+                class="ep-status"
+                aria-label="后端状态详情"
+                aria-haspopup="dialog"
+              >
+                <span
+                  class="ep-status__dot"
+                  :class="`ep-status__dot--${statusKind}`"
+                  aria-hidden="true"
+                />
+                <span class="ep-status__text">{{ health.connectionText }}</span>
+                <span v-if="health.capabilitySummary" class="ep-status__hint">
+                  {{ health.capabilitySummary }}
+                </span>
+                <ElIcon class="ep-status__caret" :size="12"><ArrowDown /></ElIcon>
+              </button>
+            </template>
+
+            <div class="ep-health" role="group" aria-label="后端状态分层详情">
+              <p class="ep-health__title">后端状态详情</p>
+
+              <section class="ep-health__layer">
+                <p class="ep-health__layer-title">1. 连接</p>
+                <p class="ep-health__row">
+                  <span class="ep-health__label">后端进程</span>
+                  <span class="ep-health__value">{{ health.connectionText }}</span>
+                </p>
+                <p v-if="health.data" class="ep-health__row">
+                  <span class="ep-health__label">版本</span>
+                  <span class="ep-health__value">{{ health.data.version }}</span>
+                </p>
+                <p v-if="health.serviceStatusText" class="ep-health__row">
+                  <span class="ep-health__label">服务状态</span>
+                  <span class="ep-health__value">{{ health.serviceStatusText }}</span>
+                </p>
+                <p v-if="health.connection === 'error'" class="ep-health__note">
+                  {{ health.errorMessage ?? '无法读取后端状态。' }}
+                </p>
+                <ElButton v-if="health.connection === 'error'" size="small" @click="health.load()">
+                  重新检测
+                </ElButton>
+              </section>
+
+              <section v-if="health.capabilityRows.length" class="ep-health__layer">
+                <p class="ep-health__layer-title">2. 能力</p>
+                <p v-for="row in health.capabilityRows" :key="row.key" class="ep-health__row">
+                  <span class="ep-health__label">{{ row.label }}</span>
+                  <span class="ep-health__value" :data-state="row.state">{{ row.text }}</span>
+                </p>
+                <p v-if="health.chatHint" class="ep-health__note">{{ health.chatHint }}</p>
+              </section>
+
+              <section v-if="health.providerRows.length" class="ep-health__layer">
+                <p class="ep-health__layer-title">3. Provider</p>
+                <p v-for="row in health.providerRows" :key="row.key" class="ep-health__row">
+                  <span class="ep-health__label">{{ row.label }}</span>
+                  <span class="ep-health__value">
+                    {{ row.text }}<span class="ep-health__detail">（{{ row.detail }}）</span>
+                  </span>
+                </p>
+                <p class="ep-health__note">
+                  「尚无成功调用证据」只表示还没发生成功调用，不代表 Provider 故障。
+                </p>
+              </section>
+
+              <section class="ep-health__layer">
+                <p class="ep-health__layer-title">4. 资料</p>
+                <p class="ep-health__row">
+                  <span class="ep-health__label">可检索文档</span>
+                  <span class="ep-health__value">{{ libraryText }}</span>
+                </p>
+              </section>
+            </div>
+          </ElPopover>
           <ElTag v-if="health.runModeLabel" size="small" type="info" effect="plain" disable-transitions>
             {{ health.runModeLabel }}
           </ElTag>
@@ -264,9 +330,89 @@ onMounted(() => {
   display: inline-flex;
   align-items: center;
   gap: var(--ep-space-2);
+  padding: 2px var(--ep-space-2);
+  font: inherit;
   font-size: 13px;
   line-height: 20px;
   color: var(--ep-color-text-secondary);
+  background: none;
+  border: none;
+  cursor: pointer;
+}
+
+.ep-status:hover {
+  background-color: var(--ep-color-surface-subtle);
+}
+
+.ep-status:focus-visible {
+  outline: none;
+  box-shadow: var(--ep-focus-ring);
+}
+
+.ep-status__hint {
+  color: var(--ep-color-text-muted);
+}
+
+.ep-status__caret {
+  color: var(--ep-color-text-muted);
+}
+
+.ep-health {
+  display: flex;
+  flex-direction: column;
+  gap: var(--ep-space-3);
+  font-size: 13px;
+  line-height: 20px;
+  color: var(--ep-color-text-secondary);
+}
+
+.ep-health__title {
+  font-weight: 600;
+  color: var(--ep-color-text);
+}
+
+.ep-health__layer {
+  border-top: 1px solid var(--ep-color-border-light);
+  padding-top: var(--ep-space-2);
+}
+
+.ep-health__layer-title {
+  font-weight: 500;
+  color: var(--ep-color-text-muted);
+}
+
+.ep-health__row {
+  display: flex;
+  justify-content: space-between;
+  gap: var(--ep-space-3);
+  margin-top: var(--ep-space-1);
+}
+
+.ep-health__label {
+  flex-shrink: 0;
+}
+
+.ep-health__value {
+  text-align: right;
+  overflow-wrap: anywhere;
+}
+
+.ep-health__value[data-state='ready'] {
+  color: var(--ep-color-success);
+}
+
+.ep-health__value[data-state='unconfigured'],
+.ep-health__value[data-state='unavailable'] {
+  color: var(--ep-color-warning);
+}
+
+.ep-health__detail {
+  color: var(--ep-color-text-muted);
+}
+
+.ep-health__note {
+  margin-top: var(--ep-space-1);
+  color: var(--ep-color-text-muted);
 }
 
 .ep-status__dot {

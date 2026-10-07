@@ -18,6 +18,11 @@
   就永远无法把 ``loaded`` 变成 true。
 - ``capabilities.planning`` 只表示「规划能力是否可用」，**不依赖**库里是否已经有可选的
   record / rule set（空库同样是 ready，``POST /api/academic/plan`` 对不存在的 ID 正常返回 4xx）。
+- ``status`` 由**能力前置条件**动态计算（``_service_status``）：三项能力全部 ``ready``
+  才是 ``healthy``，否则 ``degraded``。它**不参与**判定 Provider 是否已成功调用，
+  因此 API Provider 在首次问答前 ``ready=false`` 不会把服务锁死在 ``degraded``；
+  反过来，``healthy`` 也**只**表示前置条件满足，**不代表**端到端模型调用或模型质量
+  已经验证通过。
 - ``providers.*.ready`` 只反映 Provider **真实**的成功证据：API Provider 在首次成功
   调用前为 false，失败或 close 后恢复 false；本地模型权重未加载时一律 false。
 - 可检索文档统计复用检索侧 ``RetrievalScope`` + eligibility 口径，
@@ -33,7 +38,13 @@ from sqlalchemy import text
 from app.api.deps import AppContext, get_context, get_settings_dep
 from app.config import Settings
 from app.db import session_scope
-from app.schemas.health import Capabilities, HealthResponse, ProviderStatus, Providers
+from app.schemas.health import (
+    Capabilities,
+    HealthResponse,
+    ProviderStatus,
+    Providers,
+    ServiceStatus,
+)
 from app.search.eligibility import DOC_ALIAS, ELIGIBILITY_FROM, build_eligibility
 from app.search.hydrate import build_scope
 
@@ -106,12 +117,34 @@ def _planning_capability(context: AppContext) -> str:
         return "unavailable"
 
 
+def _service_status(capabilities: Capabilities) -> ServiceStatus:
+    """按能力**前置条件**汇总服务状态：三项能力全部 ``ready`` 才是 ``healthy``。
+
+    只看能力前置条件，**不看** Provider 是否已经发生过成功调用：
+
+    - API Provider 在第一次问答之前 ``ready=false`` 属正常现象，用它判定 ``degraded``
+      会把服务锁死，等于阻止第一次问答；
+    - 因此 ``healthy`` 只表示「文档子系统可用 + LLM 已配置且存在可检索语料 +
+      学业结构可读」三项前置条件成立，**不代表**端到端模型调用、模型质量或引用
+      正确性已经验证通过。
+
+    空知识库时 ``chat`` 为 ``unavailable``（没有可检索语料），因此状态为 ``degraded``，
+    但这**不影响**文档功能与上传：``capabilities.documents`` 仍为 ``ready``。
+    """
+    states = (capabilities.documents, capabilities.chat, capabilities.planning)
+    return "healthy" if all(state == "ready" for state in states) else "degraded"
+
+
 @router.get("/health", response_model=HealthResponse)
 def read_health(
     settings: Settings = Depends(get_settings_dep),
     context: AppContext = Depends(get_context),
 ) -> HealthResponse:
-    """返回进程状态与能力信息；status 只在上游能力真实就绪时才可能为 healthy。"""
+    """返回进程状态与能力信息。
+
+    ``status`` 由能力前置条件动态计算（``healthy`` / ``degraded``），不加载模型、
+    不访问网络、不运行规划计算。
+    """
     # 只有 Provider 真的加载了模型/取得过真实成功证据才报告 ready，绝不谎报
     embedding_ready = bool(context.embeddings.loaded)
     reranker_ready = bool(context.reranker.loaded)
@@ -119,14 +152,15 @@ def read_health(
     # 阶段 8 前置：documents 表示**子系统可用性**（空库同样 ready），
     # 可检索数量只用于 chat 是否具备检索语料
     retrievable = _retrievable_documents(context)
+    capabilities = Capabilities(
+        documents=_documents_capability(context, retrievable),
+        chat=_chat_capability(context, retrievable),
+        planning=_planning_capability(context),
+    )
     return HealthResponse(
-        status="degraded",
+        status=_service_status(capabilities),
         version=settings.app_version,
-        capabilities=Capabilities(
-            documents=_documents_capability(context, retrievable),
-            chat=_chat_capability(context, retrievable),
-            planning=_planning_capability(context),
-        ),
+        capabilities=capabilities,
         providers=Providers(
             embedding=ProviderStatus(
                 provider=settings.embedding_provider,
