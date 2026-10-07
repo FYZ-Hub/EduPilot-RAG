@@ -8,6 +8,12 @@
 - 编排：`docker-compose.yml`（CPU，默认）+ `docker-compose.gpu.yml`（可选 GPU 叠加）
 - 产品与验收口径：`docs/PRODUCT_SPEC.md`、`docs/UI_SPEC.md`、`docs/IMPLEMENTATION_PLAN.md`
 
+## 参赛团队
+
+- 团队名称：智联栈
+- 学校：西安明德理工学院
+- 成员：付毅中、刘程甜、陈卓
+
 ## 1. 前置条件
 
 - Docker Desktop（含 Compose v2，`docker compose version` 可用）
