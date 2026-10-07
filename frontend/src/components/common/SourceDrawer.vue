@@ -1,6 +1,6 @@
 <script setup lang="ts">
 /**
- * 来源原文抽屉（UI_SPEC 6.6 / 10）：共享组件，按 ``chunk_id`` 调用
+ * 来源原文抽屉（UI_SPEC 6.6 / 11）：共享组件，按 ``chunk_id`` 调用
  * ``GET /api/sources/{chunk_id}``，只有用户点击「查看原文」时才请求。
  *
  * - 关闭或切换来源时中止上一个请求，旧响应绝不覆盖较新的来源；

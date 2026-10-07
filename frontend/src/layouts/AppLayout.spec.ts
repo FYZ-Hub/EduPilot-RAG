@@ -135,10 +135,11 @@ describe('AppLayout', () => {
     expect(wrapper.find('#main-content').exists()).toBe(true)
   })
 
-  it('renders the three fixed navigation entries in order', async () => {
+  it('renders the four fixed navigation entries in order', async () => {
     const { wrapper } = await mountLayout()
 
     expect(sidebarNavLinks(wrapper).map((link) => link.text())).toEqual([
+      '首页',
       '知识库管理',
       'RAG 问答',
       '学业规划',
@@ -170,6 +171,7 @@ describe('AppLayout', () => {
     // 768–1199px 会通过 CSS 隐藏 .ep-nav__label（图标侧栏），
     // 因此链接必须自带 aria-label，否则图标模式下没有任何可访问名称。
     expect(sidebarNavLinks(wrapper).map((link) => link.attributes('aria-label'))).toEqual([
+      '首页',
       '知识库管理',
       'RAG 问答',
       '学业规划',

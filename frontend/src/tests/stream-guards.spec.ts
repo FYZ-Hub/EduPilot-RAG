@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /**
- * Chat 协议层的源码级守卫（UI_SPEC 6.5 / 9、PRODUCT_SPEC 6.3）：
+ * Chat 协议层的源码级守卫（UI_SPEC 6.5 / 10、PRODUCT_SPEC 6.3）：
  * 不得使用浏览器原生的事件源接口（接口是 POST，必须走 fetch 流），
  * 不得向 DOM 注入原始 HTML，也不得把问题、回答或 quote 写进浏览器控制台。
  *

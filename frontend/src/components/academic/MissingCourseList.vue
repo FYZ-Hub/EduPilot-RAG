@@ -113,7 +113,7 @@ function linked(course: MissingRequiredCourse): PlanningEvidence[] {
   font-variant-numeric: tabular-nums;
 }
 
-/* UI_SPEC 9：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
+/* UI_SPEC 10：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
 .ep-evidence-chip {
   display: inline-flex;
   align-items: center;

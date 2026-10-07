@@ -4,7 +4,7 @@ import { join, resolve } from 'node:path'
 import { describe, expect, it } from 'vitest'
 
 /**
- * UI_SPEC 9：文档 quote、文件名与错误消息一律按纯文本渲染，
+ * UI_SPEC 10：文档 quote、文件名与错误消息一律按纯文本渲染，
  * 禁止 ``v-html`` 直接渲染后端或模型内容。
  */
 function vueFiles(directory: string): string[] {

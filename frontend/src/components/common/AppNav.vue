@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { ChatDotRound, DataAnalysis, FolderOpened } from '@element-plus/icons-vue'
+import { ChatDotRound, DataAnalysis, FolderOpened, HomeFilled } from '@element-plus/icons-vue'
 import { RouterLink } from 'vue-router'
 
 /** 主导航顺序固定（UI_SPEC 2.3）。 */
 const items = [
+  { name: 'home', label: '首页', icon: HomeFilled },
   { name: 'knowledge', label: '知识库管理', icon: FolderOpened },
   { name: 'chat', label: 'RAG 问答', icon: ChatDotRound },
   { name: 'planning', label: '学业规划', icon: DataAnalysis },

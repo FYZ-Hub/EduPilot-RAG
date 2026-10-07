@@ -4,17 +4,17 @@ import { createMemoryHistory } from 'vue-router'
 import { createAppRouter } from './index'
 
 describe('router', () => {
-  it('redirects / to /knowledge', async () => {
+  it('renders the home page at /', async () => {
     const router = createAppRouter(createMemoryHistory())
 
     await router.push('/')
     await router.isReady()
 
-    expect(router.currentRoute.value.path).toBe('/knowledge')
-    expect(router.currentRoute.value.name).toBe('knowledge')
+    expect(router.currentRoute.value.path).toBe('/')
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
-  it('resolves the three core routes', async () => {
+  it('resolves the home page plus the three core routes', async () => {
     const router = createAppRouter(createMemoryHistory())
 
     await router.push('/knowledge')
@@ -26,6 +26,9 @@ describe('router', () => {
 
     await router.push('/planning')
     expect(router.currentRoute.value.name).toBe('planning')
+
+    await router.push('/')
+    expect(router.currentRoute.value.name).toBe('home')
   })
 
   it('falls back to the not-found route for unknown paths', async () => {

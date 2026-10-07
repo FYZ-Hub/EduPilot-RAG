@@ -61,7 +61,7 @@ function isAvailable(index: number): boolean {
   overflow-wrap: anywhere;
 }
 
-/* 引用标记始终使用证据色，与普通按钮区分（UI_SPEC 11.3） */
+/* 引用标记始终使用证据色，与普通按钮区分（UI_SPEC 12.3） */
 .ep-citation {
   display: inline-flex;
   align-items: center;

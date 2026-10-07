@@ -1,5 +1,5 @@
 /**
- * 文档列表状态（UI_SPEC 10：跨组件状态放 Pinia）。
+ * 文档列表状态（UI_SPEC 11：跨组件状态放 Pinia）。
  *
  * - 统计卡直接使用 ``GET /api/documents`` 的 total / counts.*，不在前端重算权威数字；
  * - 列表存在非终态 upload 文档时每 2 秒查询对应 ``/documents/{id}/status``，

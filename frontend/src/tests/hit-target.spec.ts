@@ -4,7 +4,7 @@ import { resolve } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 /**
- * UI_SPEC 9：可点击目标桌面最小 40×40px、移动端最小 44×44px。
+ * UI_SPEC 10：可点击目标桌面最小 40×40px、移动端最小 44×44px。
  *
  * 这里做**样式守卫**（必须显式声明 min-height，不能靠文字行高碰巧撑大）；
  * 真实 bounding box 由下一轮 Playwright 端到端验收负责。

@@ -1,5 +1,5 @@
 /**
- * 集中式 API 客户端（UI_SPEC 10）。
+ * 集中式 API 客户端（UI_SPEC 11）。
  *
  * - Base URL **只在此处定义**，其他模块不得自行拼接主机地址。
  * - 统一解析后端错误体 `{code, message, details, request_id}`（app/core/errors.py）。

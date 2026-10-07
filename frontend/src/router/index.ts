@@ -3,7 +3,7 @@ import { createRouter, createWebHistory, type Router, type RouterHistory } from 
 import AppLayout from '@/layouts/AppLayout.vue'
 
 /**
- * 路由表固定为 UI_SPEC 2.1：/ -> /knowledge，另有 /chat、/planning 与 404。
+ * 路由表固定为 UI_SPEC 2.1：/ -> 首页，另有 /knowledge、/chat、/planning 与 404。
  */
 export function createAppRouter(history?: RouterHistory): Router {
   return createRouter({
@@ -13,7 +13,12 @@ export function createAppRouter(history?: RouterHistory): Router {
         path: '/',
         component: AppLayout,
         children: [
-          { path: '', redirect: '/knowledge' },
+          {
+            path: '',
+            name: 'home',
+            component: () => import('@/views/HomeView.vue'),
+            meta: { title: '首页', description: '三项核心能力与快速入口' },
+          },
           {
             path: 'knowledge',
             name: 'knowledge',

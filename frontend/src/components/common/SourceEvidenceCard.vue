@@ -147,7 +147,7 @@ function rowRange(
   background: #fff;
 }
 
-/* 选择引用是真正的 button：Tab 可聚焦，Enter / Space 原生激活（UI_SPEC 9 / 11.3） */
+/* 选择引用是真正的 button：Tab 可聚焦，Enter / Space 原生激活（UI_SPEC 10 / 12.3） */
 .ep-evidence-card__select {
   display: flex;
   gap: var(--ep-space-2);
@@ -246,7 +246,7 @@ function rowRange(
   overflow-wrap: anywhere;
 }
 
-/* UI_SPEC 9：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
+/* UI_SPEC 10：可点击目标桌面最小 40×40，移动端最小 44×44（显式声明，不靠行高撑大） */
 .ep-evidence-card__open {
   min-height: 40px;
   padding: 0 var(--ep-space-2);
