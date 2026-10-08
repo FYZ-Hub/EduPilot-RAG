@@ -106,10 +106,14 @@ LLM_MODEL=
 
 ## 6. GPU 模式当前状态
 
-- GPU 模式目前**只完成静态 Compose 校验**（`config --quiet` 通过），
-  **尚未做真实 GPU 运行验证**；本仓库不声称 GPU 已完成验收。
+- 2026-10-08 已在 **NVIDIA GeForce RTX 4060 Laptop（8GB）** 上完成实际运行验证：
+  宿主机 `nvidia-smi` 正常；`nvidia/cuda:12.8.1-base-ubuntu24.04` 容器通过
+  `--gpus all` 识别同一张显卡；`.\run.ps1 -Mode gpu` 启动成功，前后端均返回 HTTP 200。
 - GPU 叠加文件会设置 `profiles: [gpu]`、`gpus: all`，并把 `EMBEDDING_DEVICE` /
-  `RERANK_DEVICE` 固定为 `cuda`。启用前请先自行完成容器 GPU 验证（见 `docs/PRODUCT_SPEC.md` §4.2）。
+  `RERANK_DEVICE` 固定为 `cuda`。上述结果证明 **Docker GPU 透传与项目 GPU 模式启动通过**。
+- 该验证不等于本地 BGE 模型已完成 GPU 推理：当前默认镜像仍不安装本地模型依赖和权重；
+  使用 API Provider 时，模型计算发生在远程服务。只有补齐第 5 节所述依赖与权重，并真实完成
+  Embedding 与 Rerank 调用后，才能声明本地模型 GPU 推理通过。
 
 ## 7. 数据持久化与恢复
 
@@ -199,15 +203,18 @@ docker compose -f docker-compose.yml -f docker-compose.gpu.yml --profile gpu exe
   同一参数转发 harness 已在 Windows PowerShell 5.1 通过；
 - CPU 与 GPU Compose 均在禁用仓库 `.env`、仅使用 `.env.example` 时通过 `config --quiet`；
 - CPU smoke 已真实验证双端 HTTP 200、无 GPU 申请、显式 demo seed、任务重启恢复和持久化复用。
+- GPU smoke 已真实验证 RTX 4060 宿主驱动、CUDA 容器 GPU 透传及 `.\run.ps1 -Mode gpu`
+  项目启动；前后端均返回 HTTP 200。
 
 更完整的阶段验收与命令记录见 `PROJECT_STATUS.md`。
 
 ## 13. 已知质量边界
 
 - 正式语义评测 run `20261006-152530` 的 `citation_support_rate` 为 `34/41 = 0.8293`，
-  低于项目内部 `0.90` 门槛，因此阶段 9B 保持 `incomplete`，不得表述为已通过。
+  高于本项目提交验收门槛 `0.80`，因此**语义质量门禁通过**；实测值与后续改进空间仍如实保留。
 - 离线 smoke 使用 fake Provider，只用于验证系统链路，不代表真实模型回答质量。
-- GPU 仅完成静态 Compose 校验；默认镜像不含本地模型依赖和权重，均不得表述为已完成运行验收。
+- GPU 容器透传与项目 GPU 模式启动已通过；默认镜像仍不含本地模型依赖和权重，
+  因此不得表述为“本地模型 GPU 推理已验证”。
 
 ## 14. 获取代码
 

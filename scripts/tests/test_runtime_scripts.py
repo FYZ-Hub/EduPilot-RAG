@@ -323,11 +323,12 @@ def test_readme_is_honest_about_local_models_and_gpu() -> None:
     # 必须明确默认镜像不安装本地模型依赖
     assert "不安装" in text
     assert "requirements-embedding-local.txt" in text
-    # 必须明确 GPU 尚未真实验证
-    assert "GPU" in text
-    assert "尚未" in text
-    for wrong in ("GPU 已验证", "GPU已验证", "GPU 可用", "GPU可用"):
-        assert wrong not in text, wrong
+    # 必须如实区分 GPU 运行验收与本地模型 GPU 推理验收
+    assert "NVIDIA GeForce RTX 4060 Laptop" in text
+    assert "Docker GPU 透传与项目 GPU 模式启动通过" in text
+    assert ".\\run.ps1 -Mode gpu" in text
+    assert "本地模型 GPU 推理" in text
+    assert "不得表述为“本地模型 GPU 推理已验证”" in text
 
 
 def test_readme_gpu_examples_always_carry_overlay_and_profile() -> None:
